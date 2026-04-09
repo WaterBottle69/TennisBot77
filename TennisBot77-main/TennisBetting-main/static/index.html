@@ -1,0 +1,1475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>DEEP ALPHA // MARKOV TENNIS ENGINE</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+  <style>
+    /* ─── BASE ─────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:       #080808;
+      --surface:  #111111;
+      --surface2: #181818;
+      --border:   #2a2a2a;
+      --border-hi: #ffffff;
+      --text:     #f0f0f0;
+      --dim:      #555555;
+      --mid:      #888888;
+      --font:     'Space Mono', monospace;
+      --fs:       12px;
+      --radius:   0px;
+    }
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: var(--fs);
+      overflow-x: hidden;
+    }
+    b { font-weight: 700; }
+    ::selection { background: #333; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); }
+
+    /* ─── TOPBAR ───────────────────────────────────────────────── */
+    #topbar {
+      display: flex;
+      align-items: stretch;
+      border-bottom: 2px solid var(--border-hi);
+      background: #000;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      height: 48px;
+    }
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      border-right: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      white-space: nowrap;
+    }
+    .topbar-meta {
+      display: flex;
+      flex: 1;
+      align-items: stretch;
+    }
+    .topbar-cell {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 0 20px;
+      border-right: 1px solid var(--border);
+      min-width: 120px;
+    }
+    .topbar-cell .tc-label {
+      font-size: 9px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .topbar-cell .tc-value {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.2;
+      margin-top: 1px;
+    }
+    #status-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--dim);
+      margin-right: 6px;
+      vertical-align: middle;
+      transition: background 0.3s;
+    }
+    #status-dot.online { background: #fff; box-shadow: 0 0 8px #fff; }
+
+    /* ─── INPUT ROW ────────────────────────────────────────────── */
+    #input-row {
+      display: flex;
+      align-items: stretch;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      height: 52px;
+    }
+    .ir-cell {
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      border-right: 1px solid var(--border);
+    }
+    .ir-cell label {
+      font-size: 10px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-right: 10px;
+      white-space: nowrap;
+    }
+    .ir-cell input {
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      font-weight: 700;
+      width: 220px;
+      padding: 4px 0;
+      outline: none;
+      letter-spacing: 1px;
+      transition: border-color 0.2s;
+    }
+    .ir-cell input:focus { border-bottom-color: var(--text); }
+    .ir-cell input::placeholder { color: var(--dim); font-weight: 400; font-size: 11px; }
+    .ir-vs {
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      color: var(--dim);
+      font-size: 11px;
+      letter-spacing: 3px;
+      border-right: 1px solid var(--border);
+    }
+    .ir-action { margin-left: auto; display: flex; align-items: center; padding: 0 16px; gap: 12px; }
+    .btn {
+      background: var(--text);
+      border: 2px solid var(--text);
+      color: #000;
+      padding: 7px 20px;
+      font-family: var(--font);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      cursor: pointer;
+      transition: all 0.15s;
+      text-transform: uppercase;
+    }
+    .btn:hover { background: transparent; color: var(--text); }
+    .btn.secondary {
+      background: transparent;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn.secondary:hover { border-color: var(--text); }
+    .btn.loading { opacity: 0.4; pointer-events: none; }
+
+    /* ─── MAIN GRID ─────────────────────────────────────────────── */
+    #dashboard {
+      display: grid;
+      grid-template-columns: 300px 1fr 340px;
+      grid-template-rows: auto auto auto;
+      gap: 0;
+      border-left: 1px solid var(--border);
+    }
+
+    /* Column dividers via border-right on children */
+    .col-left { grid-column: 1; border-right: 1px solid var(--border); }
+    .col-center { grid-column: 2; border-right: 1px solid var(--border); }
+    .col-right { grid-column: 3; }
+    .col-full { grid-column: 1 / 4; border-top: 1px solid var(--border); }
+
+    /* ─── PANEL BASE ───────────────────────────────────────────── */
+    .panel {
+      padding: 20px 22px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-title {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 3px;
+      color: var(--dim);
+      text-transform: uppercase;
+    }
+    .panel-badge {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: var(--mid);
+      text-transform: uppercase;
+    }
+
+    /* ─── WIN PROBABILITY ──────────────────────────────────────── */
+    #panel-winprob { grid-column: 1; grid-row: 1; }
+
+    .matchup-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      margin-bottom: 16px;
+    }
+    .player-prob-block {
+      padding: 16px 0;
+    }
+    .player-prob-block:first-child {
+      padding-right: 16px;
+      border-right: 1px solid var(--border);
+    }
+    .player-prob-block:last-child {
+      padding-left: 16px;
+    }
+    .ppb-name {
+      font-size: 9px;
+      letter-spacing: 2px;
+      color: var(--dim);
+      text-transform: uppercase;
+      margin-bottom: 6px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .ppb-pct {
+      font-size: 44px;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--text);
+      letter-spacing: -2px;
+    }
+    .ppb-pct.dim { color: var(--mid); }
+    .ppb-label {
+      font-size: 9px;
+      color: var(--dim);
+      margin-top: 4px;
+      letter-spacing: 1px;
+    }
+
+    .prob-bar-track {
+      height: 3px;
+      background: var(--border);
+      margin: 10px 0 0;
+      overflow: hidden;
+    }
+    .prob-bar-fill {
+      height: 100%;
+      background: var(--text);
+      transition: width 0.8s ease;
+    }
+    .prob-bar-fill.dim { background: var(--mid); }
+
+    /* ELO / Form stats */
+    .stat-2col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-top: 1px solid var(--border);
+      margin-top: 4px;
+    }
+    .stat-2col-item {
+      padding: 10px 0;
+    }
+    .stat-2col-item:first-child {
+      padding-right: 16px;
+      border-right: 1px solid var(--border);
+    }
+    .stat-2col-item:last-child { padding-left: 16px; }
+    .stat-2col-item + .stat-2col-item + .stat-2col-item {
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+    .s2-label {
+      font-size: 8px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 3px;
+    }
+    .s2-value {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    /* ─── VOLUME DELTAS ────────────────────────────────────────── */
+    #panel-volume { grid-column: 1; grid-row: 2; }
+
+    .vol-entry { margin-bottom: 14px; }
+    .vol-entry:last-child { margin-bottom: 0; }
+    .vol-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .vol-name {
+      font-size: 9px;
+      color: var(--mid);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .vol-val {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .vol-bar-bg {
+      height: 4px;
+      background: var(--border);
+      overflow: hidden;
+    }
+    .vol-bar-fill {
+      height: 100%;
+      background: var(--text);
+      transition: width 0.4s ease;
+    }
+    .vol-bar-fill.secondary { background: var(--mid); }
+
+    /* ─── MARKOV CHART ─────────────────────────────────────────── */
+    #panel-chart { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; }
+    .chart-hero {
+      flex: 1;
+      min-height: 280px;
+      position: relative;
+    }
+    .chart-hero canvas { position: absolute; inset: 0; }
+    .chart-stats-bar {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-top: 1px solid var(--border);
+      margin-top: 16px;
+    }
+    .csb-item {
+      padding: 12px 0;
+    }
+    .csb-item:not(:last-child) { border-right: 1px solid var(--border); padding-right: 16px; margin-right: 16px; }
+    .csb-label {
+      font-size: 8px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .csb-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    /* ─── 3D ALPHA SURFACE ──────────────────────────────────────── */
+    #panel-surface { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; }
+    #surface-plot { flex: 1; min-height: 340px; }
+
+    /* ─── STOP BUTTON ───────────────────────────────────────────── */
+    .btn-stop {
+      background: transparent;
+      border: 2px solid var(--text);
+      color: var(--text);
+      padding: 7px 20px;
+      font-family: var(--font);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      cursor: pointer;
+      transition: all 0.15s;
+      text-transform: uppercase;
+    }
+    .btn-stop:hover { background: var(--text); color: #000; }
+    .btn-stop.active {
+      border-color: #ff3333;
+      color: #ff3333;
+    }
+    .btn-stop.active:hover { background: #ff3333; color: #000; }
+
+    /* HF mode button active state */
+    .btn.hf-active {
+      background: var(--text);
+      color: #000;
+      border-color: var(--text);
+      animation: hf-pulse 1.4s infinite;
+    }
+    @keyframes hf-pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.65; }
+    }
+
+    /* ─── BOT STATUS ───────────────────────────────────────────── */
+    #panel-status { grid-column: 3; grid-row: 1; }
+
+    .status-table { width: 100%; border-collapse: collapse; }
+    .status-table tr { border-bottom: 1px solid var(--border); }
+    .status-table tr:last-child { border-bottom: none; }
+    .status-table td {
+      padding: 9px 0;
+      font-size: 11px;
+    }
+    .status-table td:first-child {
+      color: var(--dim);
+      letter-spacing: 1px;
+      font-size: 9px;
+      text-transform: uppercase;
+      width: 50%;
+    }
+    .status-table td:last-child {
+      text-align: right;
+      font-weight: 700;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .sv-on { color: var(--text) !important; }
+    .sv-off { color: var(--dim) !important; }
+
+    /* Kalshi creds */
+    .creds-section {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
+    .creds-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .creds-title {
+      font-size: 9px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .btn-xs {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--mid);
+      padding: 3px 8px;
+      font-family: var(--font);
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      cursor: pointer;
+      text-transform: uppercase;
+      transition: all 0.15s;
+    }
+    .btn-xs:hover { border-color: var(--text); color: var(--text); }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .field-wrap { display: flex; flex-direction: column; gap: 4px; }
+    .field-label {
+      font-size: 8px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .field-input {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 11px;
+      padding: 7px 8px;
+      outline: none;
+      width: 100%;
+      transition: border-color 0.15s;
+    }
+    .field-input:focus { border-color: var(--text); }
+    .field-input::placeholder { color: var(--dim); }
+    textarea.field-input { resize: vertical; min-height: 54px; }
+
+    /* ─── BOT LOG ──────────────────────────────────────────────── */
+    #panel-log { grid-column: 3; grid-row: 2; }
+    #log-list {
+      font-family: var(--font);
+      font-size: 10px;
+      line-height: 1.7;
+      color: var(--mid);
+      background: #000;
+      border: 1px solid var(--border);
+      padding: 12px;
+      height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    #log-list::-webkit-scrollbar { width: 4px; }
+    #log-list::-webkit-scrollbar-thumb { background: var(--border); }
+
+    /* ─── PLAYER STAT CARDS ────────────────────────────────────── */
+    #cards-row {
+      grid-column: 1 / 4;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-top: 1px solid var(--border);
+    }
+    .player-card { padding: 20px 22px; }
+    .player-card:first-child { border-right: 1px solid var(--border); }
+
+    .card-name {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      margin-bottom: 16px;
+      text-transform: uppercase;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--border);
+      border-left: 1px solid var(--border);
+    }
+    .stat-cell {
+      padding: 12px 14px;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .stat-cell-label {
+      font-size: 8px;
+      color: var(--dim);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+    .stat-cell-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1;
+    }
+    .stat-cell-value.large { font-size: 22px; }
+
+    /* ─── RESPONSIVE ───────────────────────────────────────────── */
+    @media (max-width: 1100px) {
+      #dashboard { grid-template-columns: 1fr 1fr; }
+      #panel-winprob, #panel-volume { grid-column: 1; }
+      #panel-chart { grid-column: 1 / 3; grid-row: 3; }
+      #panel-status, #panel-log { grid-column: 2; }
+      #cards-row { grid-column: 1 / 3; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════ TOP BAR ═══════════════ -->
+<div id="topbar">
+  <div class="topbar-brand">DEEP ALPHA // MARKOV ENGINE</div>
+  <div class="topbar-meta">
+    <div class="topbar-cell">
+      <div class="tc-label">System</div>
+      <div class="tc-value"><span id="status-dot"></span><span id="sys-status">IDLE</span></div>
+    </div>
+    <div class="topbar-cell">
+      <div class="tc-label">Edge</div>
+      <div class="tc-value" id="meta-edge">—</div>
+    </div>
+    <div class="topbar-cell">
+      <div class="tc-label">Env</div>
+      <div class="tc-value" id="tc-env">DEMO</div>
+    </div>
+    <div class="topbar-cell">
+      <div class="tc-label">Last Run</div>
+      <div class="tc-value" id="tc-lastrun">—</div>
+    </div>
+    <div class="topbar-cell" style="margin-left:auto; border-left:1px solid var(--border); border-right:none; min-width:unset; padding:0 20px; justify-content:center;">
+      <button class="btn-stop" id="btn-stop-trades" onclick="stopTrades()">STOP TRADES</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ INPUT ROW ═══════════════ -->
+<div id="input-row">
+  <div class="ir-cell">
+    <label>Player A</label>
+    <input id="inp-a" type="text" placeholder="e.g. Carlos Alcaraz" autocomplete="off"/>
+  </div>
+  <div class="ir-vs">VS</div>
+  <div class="ir-cell">
+    <label>Player B</label>
+    <input id="inp-b" type="text" placeholder="e.g. Novak Djokovic" autocomplete="off"/>
+  </div>
+  <div class="ir-action">
+    <button class="btn" id="btn-simulate" onclick="runSimulation()">SIMULATE</button>
+    <button class="btn secondary" id="btn-load-kalshi" onclick="loadKalshiMarket()">LOAD MARKET</button>
+    <button class="btn secondary" id="btn-hf-mode" onclick="toggleHfMode()" style="letter-spacing:1px;">HF MODE: OFF</button>
+  </div>
+</div>
+
+<!-- ═══════════════ DASHBOARD GRID ═══════════════ -->
+<div id="dashboard">
+
+  <!-- ─── LEFT COL: WIN PROBABILITY ─── -->
+  <div class="panel" id="panel-winprob" style="grid-column:1; grid-row:1;">
+    <div class="panel-header">
+      <div class="panel-title">Win Probability</div>
+      <div class="panel-badge" id="wp-mode">MARKOV / ANALYTICAL</div>
+    </div>
+
+    <div class="matchup-row">
+      <div class="player-prob-block">
+        <div class="ppb-name" id="pname-a">PLAYER A</div>
+        <div class="ppb-pct" id="pprob-a">—%</div>
+        <div class="ppb-label">to win match</div>
+        <div class="prob-bar-track">
+          <div class="prob-bar-fill" id="pbar-a" style="width:50%"></div>
+        </div>
+      </div>
+      <div class="player-prob-block">
+        <div class="ppb-name" id="pname-b">PLAYER B</div>
+        <div class="ppb-pct dim" id="pprob-b">—%</div>
+        <div class="ppb-label">to win match</div>
+        <div class="prob-bar-track">
+          <div class="prob-bar-fill dim" id="pbar-b" style="width:50%"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stat-2col">
+      <div class="stat-2col-item">
+        <div class="s2-label">ELO — A</div>
+        <div class="s2-value" id="elo-a">—</div>
+      </div>
+      <div class="stat-2col-item">
+        <div class="s2-label">ELO — B</div>
+        <div class="s2-value" id="elo-b">—</div>
+      </div>
+      <div class="stat-2col-item" style="border-top:1px solid var(--border); padding-top:10px;">
+        <div class="s2-label">Form — A</div>
+        <div class="s2-value" id="form-a">—</div>
+      </div>
+      <div class="stat-2col-item" style="border-top:1px solid var(--border); padding-top:10px;">
+        <div class="s2-label">Form — B</div>
+        <div class="s2-value" id="form-b">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── LEFT COL: VOLUME DELTAS ─── -->
+  <div class="panel" id="panel-volume" style="grid-column:1; grid-row:2;">
+    <div class="panel-header">
+      <div class="panel-title">Volume Deltas</div>
+      <div class="panel-badge">ORDER BOOK</div>
+    </div>
+
+    <div class="vol-entry">
+      <div class="vol-meta">
+        <div class="vol-name" id="vname-a">PLAYER A</div>
+        <div class="vol-val" id="vval-a">$0.00</div>
+      </div>
+      <div class="vol-bar-bg">
+        <div class="vol-bar-fill" id="vbar-a" style="width:0%"></div>
+      </div>
+    </div>
+    <div class="vol-entry">
+      <div class="vol-meta">
+        <div class="vol-name" id="vname-b">PLAYER B</div>
+        <div class="vol-val" id="vval-b">$0.00</div>
+      </div>
+      <div class="vol-bar-bg">
+        <div class="vol-bar-fill secondary" id="vbar-b" style="width:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── CENTER ROW 1: 3D ALPHA SURFACE ─── -->
+  <div class="panel" id="panel-surface" style="grid-column:2; grid-row:1;">
+    <div class="panel-header">
+      <div class="panel-title">3D Alpha Surface</div>
+      <div class="panel-badge">EDGE × MARKET PROB → ROI</div>
+    </div>
+    <div id="surface-plot"></div>
+  </div>
+
+  <!-- ─── CENTER ROW 2: MARKOV STATE DIAGRAM ─── -->
+  <div class="panel" id="panel-chart" style="grid-column:2; grid-row:2;">
+    <div class="panel-header">
+      <div class="panel-title">Markov State Model</div>
+      <div class="panel-badge" id="mc-subtitle">AWAITING INPUT</div>
+    </div>
+    <div class="chart-hero">
+      <canvas id="mc-chart"></canvas>
+    </div>
+    <div class="chart-stats-bar">
+      <div class="csb-item">
+        <div class="csb-label">Win Prob (A)</div>
+        <div class="csb-value" id="mc-med">—</div>
+      </div>
+      <div class="csb-item">
+        <div class="csb-label">CI Lower</div>
+        <div class="csb-value" id="mc-ci-low">—</div>
+      </div>
+      <div class="csb-item">
+        <div class="csb-label">CI Upper</div>
+        <div class="csb-value" id="mc-ci-high">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── RIGHT COL: BOT STATUS ─── -->
+  <div class="panel" id="panel-status" style="grid-column:3; grid-row:1;">
+    <div class="panel-header">
+      <div class="panel-title">System Status</div>
+      <div class="panel-badge" id="st-kalshi-env">DEMO</div>
+    </div>
+
+    <table class="status-table">
+      <tbody>
+        <tr>
+          <td>Scraper</td>
+          <td class="sv-on" id="st-scraper">ONLINE</td>
+        </tr>
+        <tr>
+          <td>Markov Engine</td>
+          <td class="sv-on" id="st-mc">ACTIVE</td>
+        </tr>
+        <tr>
+          <td>Kalshi Env</td>
+          <td id="st-kalshi">DEMO</td>
+        </tr>
+        <tr>
+          <td>Last Simulation</td>
+          <td id="st-time">—</td>
+        </tr>
+        <tr>
+          <td>Sim Method</td>
+          <td>ANALYTICAL</td>
+        </tr>
+        <tr>
+          <td>Trade Mode</td>
+          <td id="st-trade-mode">NORMAL</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="creds-section">
+      <div class="creds-header">
+        <div class="creds-title">Kalshi Credentials</div>
+        <button class="btn-xs" id="btn-toggle-env" onclick="toggleKalshiEnv()">SWITCH TO PROD</button>
+      </div>
+      <div class="field-row">
+        <div class="field-wrap">
+          <div class="field-label">Max Bet (USDC)</div>
+          <input type="number" id="k-max-bet" class="field-input" placeholder="250"/>
+        </div>
+        <div class="field-wrap">
+          <div class="field-label">API Key ID</div>
+          <input type="text" id="k-api-key" class="field-input" placeholder="key_..."/>
+        </div>
+      </div>
+      <div class="field-wrap" style="margin-bottom:10px;">
+        <div class="field-label">Private Key PEM</div>
+        <textarea id="k-api-pem" class="field-input" rows="3" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+      </div>
+      <button class="btn" id="btn-save-keys" onclick="saveKalshiKeys(event)" style="width:100%; letter-spacing:2px;">SAVE KEYS &amp; START BOT</button>
+    </div>
+  </div>
+
+  <!-- ─── RIGHT COL: BOT LOG ─── -->
+  <div class="panel" id="panel-log" style="grid-column:3; grid-row:2;">
+    <div class="panel-header">
+      <div class="panel-title">Live Bot Terminal</div>
+      <div class="panel-badge" id="log-badge">STREAMING</div>
+    </div>
+    <pre id="log-list">Awaiting bot startup...</pre>
+  </div>
+
+  <!-- ─── BOTTOM: PLAYER STAT CARDS ─── -->
+  <div id="cards-row">
+    <div class="player-card" id="card-pa-wrap">
+      <div class="card-name" id="title-pa">Player A</div>
+      <div id="card-pa">
+        <div class="stats-grid">
+          <div class="stat-cell">
+            <div class="stat-cell-label">Rank</div>
+            <div class="stat-cell-value large">—</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-cell-label">ELO</div>
+            <div class="stat-cell-value">—</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-cell-label">Win Rate</div>
+            <div class="stat-cell-value">—</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-cell-label">Record</div>
+            <div class="stat-cell-value">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="player-card" id="card-pb-wrap">
+      <div class="card-name" id="title-pb">Player B</div>
+      <div id="card-pb">
+        <div class="stats-grid">
+          <div class="stat-cell">
+            <div class="stat-cell-label">Rank</div>
+            <div class="stat-cell-value large">—</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-cell-label">ELO</div>
+            <div class="stat-cell-value">—</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-cell-label">Win Rate</div>
+            <div class="stat-cell-value">—</div>
+          </div>
+          <div class="stat-cell">
+            <div class="stat-cell-label">Record</div>
+            <div class="stat-cell-value">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ══════════════════════════════════════════════════════════
+   MARKOV STATE DIAGRAM — THREE CIRCLES (POINT / GAME / SET)
+══════════════════════════════════════════════════════════ */
+let mcAnimId   = null;
+let isFetching = false;
+let mcLastTs   = 0;
+let mcParticles = [];
+let mcState    = { pointProb: 0.5, gameProb: 0.5, setProb: 0.5 };
+
+// Nodes arranged in equilateral triangle
+const MC_NODES = [
+  { label: 'POINT', x: 0.18, y: 0.74, color: '#ffffff' },
+  { label: 'GAME',  x: 0.50, y: 0.16, color: '#aaaaaa' },
+  { label: 'SET',   x: 0.82, y: 0.74, color: '#888888' },
+];
+
+// All six directed edges (fully connected mesh)
+const MC_EDGES = [
+  { from: 0, to: 1 }, { from: 1, to: 0 },
+  { from: 1, to: 2 }, { from: 2, to: 1 },
+  { from: 0, to: 2 }, { from: 2, to: 0 },
+];
+
+function spawnMCParticle(edgeIdx, prob) {
+  mcParticles.push({
+    edge:  edgeIdx,
+    t:     0,
+    speed: 0.005 + prob * 0.009,
+    alpha: 0.5 + prob * 0.5,
+    size:  1.8 + prob * 2.8,
+  });
+}
+
+function initMarkovDiagram() {
+  if (mcAnimId) { cancelAnimationFrame(mcAnimId); mcAnimId = null; }
+  mcParticles = [];
+  mcState     = { pointProb: 0.5, gameProb: 0.5, setProb: 0.5 };
+  MC_EDGES.forEach((_, i) => {
+    for (let k = 0; k < 2; k++) spawnMCParticle(i, 0.5);
+  });
+  mcLastTs = performance.now();
+  drawMarkovFrame(mcLastTs);
+}
+
+function drawMarkovFrame(ts) {
+  const canvas = document.getElementById('mc-chart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width  = canvas.offsetWidth;
+  const H = canvas.height = canvas.offsetHeight;
+
+  ctx.clearRect(0, 0, W, H);
+
+  const probs = [mcState.pointProb, mcState.gameProb, mcState.setProb];
+
+  // ── Edges ──
+  MC_EDGES.forEach((e) => {
+    const n0 = MC_NODES[e.from], n1 = MC_NODES[e.to];
+    const x0 = n0.x * W, y0 = n0.y * H;
+    const x1 = n1.x * W, y1 = n1.y * H;
+    const dx = x1 - x0, dy = y1 - y0;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    // Perpendicular offset so forward/reverse edges don't overlap
+    const ox = (-dy / len) * 6, oy = (dx / len) * 6;
+    const avgP = (probs[e.from] + probs[e.to]) / 2;
+
+    ctx.beginPath();
+    ctx.moveTo(x0 + ox, y0 + oy);
+    ctx.lineTo(x1 + ox, y1 + oy);
+    ctx.strokeStyle = `rgba(90,90,90,${0.18 + avgP * 0.32})`;
+    ctx.lineWidth   = 1 + avgP * 1.5;
+    ctx.stroke();
+
+    // Arrowhead
+    const R     = 30 + probs[e.to] * 14;
+    const angle = Math.atan2(y1 - y0, x1 - x0);
+    const ax    = x1 + ox - Math.cos(angle) * R;
+    const ay    = y1 + oy - Math.sin(angle) * R;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax - Math.cos(angle - 0.42) * 8, ay - Math.sin(angle - 0.42) * 8);
+    ctx.lineTo(ax - Math.cos(angle + 0.42) * 8, ay - Math.sin(angle + 0.42) * 8);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(110,110,110,${0.25 + avgP * 0.45})`;
+    ctx.fill();
+  });
+
+  // ── Particles ──
+  const dt = Math.min(ts - mcLastTs, 50);
+  mcLastTs = ts;
+
+  mcParticles = mcParticles.filter(p => p.t < 1.0);
+
+  if (Math.random() < 0.18) {
+    const ei  = Math.floor(Math.random() * MC_EDGES.length);
+    const e   = MC_EDGES[ei];
+    const avg = (probs[e.from] + probs[e.to]) / 2;
+    spawnMCParticle(ei, avg);
+  }
+
+  mcParticles.forEach(p => {
+    p.t += p.speed;
+    const e  = MC_EDGES[p.edge];
+    const n0 = MC_NODES[e.from], n1 = MC_NODES[e.to];
+    const x0 = n0.x * W, y0 = n0.y * H;
+    const x1 = n1.x * W, y1 = n1.y * H;
+    const dx = x1 - x0, dy = y1 - y0;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ox  = (-dy / len) * 6, oy = (dx / len) * 6;
+    const px  = x0 + ox + dx * p.t;
+    const py  = y0 + oy + dy * p.t;
+    const fade = Math.min(p.t * 5, 1) * Math.min((1 - p.t) * 5, 1);
+    ctx.beginPath();
+    ctx.arc(px, py, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${p.alpha * fade})`;
+    ctx.fill();
+  });
+
+  // ── Nodes ──
+  MC_NODES.forEach((node, i) => {
+    const cx = node.x * W, cy = node.y * H;
+    const p  = probs[i];
+    const R  = 30 + p * 16;
+
+    // Glow halo
+    const grd = ctx.createRadialGradient(cx, cy, R * 0.2, cx, cy, R * 2.2);
+    grd.addColorStop(0, `rgba(255,255,255,${0.03 + p * 0.07})`);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+
+    // Fill
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.fillStyle = '#0e0e0e';
+    ctx.fill();
+
+    // Border
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, Math.PI * 2);
+    ctx.strokeStyle = node.color;
+    ctx.lineWidth   = 1.5 + p * 1.2;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle    = node.color;
+    ctx.font         = `700 10px 'Space Mono', monospace`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(node.label, cx, cy - 9);
+
+    // Probability value
+    ctx.fillStyle = '#ffffff';
+    ctx.font      = `400 9px 'Space Mono', monospace`;
+    ctx.fillText((p * 100).toFixed(1) + '%', cx, cy + 8);
+  });
+
+  mcAnimId = requestAnimationFrame(drawMarkovFrame);
+}
+
+function updateMCChartSmooth(trajectories, ciLow, ciHigh) {
+  if (!trajectories || trajectories.length === 0) {
+    initMarkovDiagram();
+    return;
+  }
+  // Final converged match-win probability
+  const pA = trajectories[trajectories.length - 1].prob_a;
+
+  // Map hierarchical Markov levels: each level compresses the edge further
+  mcState.pointProb = pA;
+  mcState.gameProb  = 0.5 + (pA - 0.5) * 0.84;
+  mcState.setProb   = 0.5 + (pA - 0.5) * 0.68;
+
+  if (!mcAnimId) initMarkovDiagram();
+}
+
+/* ══════════════════════════════════════════════════════════
+   VOLUME DELTAS
+══════════════════════════════════════════════════════════ */
+function updateVolumeDeltas(orderBook, nameA, nameB) {
+  const volA = (orderBook?.player_a?.reduce((s, o) => s + o.size, 0)) || (Math.random() * 5000 + 500);
+  const volB = (orderBook?.player_b?.reduce((s, o) => s + o.size, 0)) || (Math.random() * 4000 + 500);
+  const maxVol = Math.max(volA, volB, 1);
+
+  document.getElementById('vname-a').textContent = nameA.toUpperCase().slice(0, 16);
+  document.getElementById('vname-b').textContent = nameB.toUpperCase().slice(0, 16);
+  document.getElementById('vval-a').textContent = '$' + volA.toFixed(0);
+  document.getElementById('vval-b').textContent = '$' + volB.toFixed(0);
+  document.getElementById('vbar-a').style.width = ((volA / maxVol) * 100) + '%';
+  document.getElementById('vbar-b').style.width = ((volB / maxVol) * 100) + '%';
+}
+
+/* ══════════════════════════════════════════════════════════
+   PLAYER CARDS
+══════════════════════════════════════════════════════════ */
+function renderPlayerCard(containerId, titleId, data, name) {
+  document.getElementById(titleId).textContent = name;
+  const el = document.getElementById(containerId);
+
+  const rank = data.ranking != null ? '#' + data.ranking : '—';
+  const elo = data.elo ? data.elo.toLocaleString() : '—';
+  const wr = data.win_rate ? (data.win_rate * 100).toFixed(1) + '%' : '—';
+  const rec = (data.season_wins != null && data.season_losses != null)
+    ? `${data.season_wins}W / ${data.season_losses}L`
+    : '—';
+
+  el.innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-cell">
+        <div class="stat-cell-label">ATP Rank</div>
+        <div class="stat-cell-value large">${rank}</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-cell-label">ELO Rating</div>
+        <div class="stat-cell-value">${elo}</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-cell-label">Win Rate</div>
+        <div class="stat-cell-value">${wr}</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-cell-label">Season Record</div>
+        <div class="stat-cell-value">${rec}</div>
+      </div>
+    </div>`;
+}
+
+/* ══════════════════════════════════════════════════════════
+   STATUS UPDATES
+══════════════════════════════════════════════════════════ */
+function updateStatus(data, nameA, nameB) {
+  document.getElementById('status-dot').className = 'online';
+  document.getElementById('sys-status').textContent = 'ACTIVE';
+
+  const edge = Math.abs(data.win_prob_a - 0.5);
+  document.getElementById('meta-edge').textContent = (edge * 100).toFixed(1) + '%';
+
+  document.getElementById('st-mc').textContent = 'COMPLETE';
+  document.getElementById('tc-lastrun').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  document.getElementById('st-time').textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  document.getElementById('mc-subtitle').textContent =
+    `${data.player_a.toUpperCase()} VS ${data.player_b.toUpperCase()}`;
+
+  document.getElementById('mc-med').textContent    = (data.win_prob_a * 100).toFixed(1) + '%';
+  document.getElementById('mc-ci-low').textContent  = (data.ci_low_a  * 100).toFixed(1) + '%';
+  document.getElementById('mc-ci-high').textContent = (data.ci_high_a * 100).toFixed(1) + '%';
+
+  // Win probability panel
+  document.getElementById('pname-a').textContent = data.player_a.toUpperCase().slice(0, 20);
+  document.getElementById('pname-b').textContent = data.player_b.toUpperCase().slice(0, 20);
+  document.getElementById('pprob-a').textContent = (data.win_prob_a * 100).toFixed(1) + '%';
+  document.getElementById('pprob-b').textContent = (data.win_prob_b * 100).toFixed(1) + '%';
+  document.getElementById('pbar-a').style.width  = (data.win_prob_a * 100) + '%';
+  document.getElementById('pbar-b').style.width  = (data.win_prob_b * 100) + '%';
+
+  // ELO & Form
+  document.getElementById('elo-a').textContent  = (data.elo_a || 0).toLocaleString();
+  document.getElementById('elo-b').textContent  = (data.elo_b || 0).toLocaleString();
+  document.getElementById('form-a').textContent = (data.form_a * 100).toFixed(0) + '%';
+  document.getElementById('form-b').textContent = (data.form_b * 100).toFixed(0) + '%';
+
+  updateVolumeDeltas(data.order_book, nameA, nameB);
+}
+
+/* ══════════════════════════════════════════════════════════
+   MAIN SIMULATION
+══════════════════════════════════════════════════════════ */
+async function runSimulation() {
+  if (isFetching) return;
+  const nameA = document.getElementById('inp-a').value.trim();
+  const nameB = document.getElementById('inp-b').value.trim();
+  if (!nameA || !nameB) return;
+
+  isFetching = true;
+  const btn = document.getElementById('btn-simulate');
+  btn.textContent = 'COMPUTING...';
+  btn.classList.add('loading');
+  document.getElementById('sys-status').textContent = 'COMPUTING';
+
+  try {
+    const res = await fetch('/api/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ player_a: nameA, player_b: nameB, num_simulations: 5000 })
+    });
+    const data = await res.json();
+
+    updateStatus(data, nameA, nameB);
+    updateMCChartSmooth(data.trajectories || [], data.ci_low_a, data.ci_high_a);
+    renderPlayerCard('card-pa', 'title-pa', data.player_a_data, nameA);
+    renderPlayerCard('card-pb', 'title-pb', data.player_b_data, nameB);
+    initSurface(data.win_prob_a);
+
+  } catch (err) {
+    console.error(err);
+    document.getElementById('sys-status').textContent = 'ERROR';
+  } finally {
+    isFetching = false;
+    btn.textContent = 'SIMULATE';
+    btn.classList.remove('loading');
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   KALSHI INTEGRATION
+══════════════════════════════════════════════════════════ */
+function applyKalshiPlayersToUi(playerA, playerB, eventTitle) {
+  if (!playerA || !playerB) return;
+  const a = String(playerA).trim();
+  const b = String(playerB).trim();
+  document.getElementById('inp-a').value = a;
+  document.getElementById('inp-b').value = b;
+  document.getElementById('pname-a').textContent = a.toUpperCase().slice(0, 20);
+  document.getElementById('pname-b').textContent = b.toUpperCase().slice(0, 20);
+  document.getElementById('vname-a').textContent = a.toUpperCase().slice(0, 16);
+  document.getElementById('vname-b').textContent = b.toUpperCase().slice(0, 16);
+  if (eventTitle) {
+    document.getElementById('mc-subtitle').textContent = String(eventTitle).slice(0, 60).toUpperCase();
+  }
+}
+
+async function loadKalshiMarket() {
+  const btn = document.getElementById('btn-load-kalshi');
+  btn.textContent = 'LOADING...';
+  btn.classList.add('loading');
+  try {
+    const res = await fetch('/api/kalshi_markets');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === 'success' && data.market) {
+        applyKalshiPlayersToUi(data.market.player_a, data.market.player_b, data.market.title || '');
+        runSimulation();
+      } else {
+        alert(data.message || 'No open markets found on Kalshi.');
+      }
+    }
+  } catch (e) {
+    console.error(e);
+  } finally {
+    btn.textContent = 'LOAD MARKET';
+    btn.classList.remove('loading');
+  }
+}
+
+async function updateKalshiEnvUI() {
+  try {
+    const res = await fetch('/api/kalshi_env');
+    if (res.ok) {
+      const data = await res.json();
+      const isProd = data.env === 'PROD';
+      document.getElementById('st-kalshi-env').textContent = data.env;
+      document.getElementById('st-kalshi').textContent = data.env;
+      document.getElementById('tc-env').textContent = data.env;
+      const btn = document.getElementById('btn-toggle-env');
+      btn.textContent = isProd ? 'SWITCH TO DEMO' : 'SWITCH TO PROD';
+    }
+  } catch (e) {}
+}
+
+async function toggleKalshiEnv() {
+  document.getElementById('btn-toggle-env').textContent = 'SWITCHING...';
+  try {
+    const res = await fetch('/api/toggle_kalshi_env', { method: 'POST' });
+    if (res.ok) await updateKalshiEnvUI();
+  } catch (e) { console.error(e); }
+}
+
+async function saveKalshiKeys(event) {
+  const keyObj = {
+    api_key_id:      document.getElementById('k-api-key').value.trim(),
+    private_key_pem: document.getElementById('k-api-pem').value.trim(),
+    max_bet_usdc:    parseFloat(document.getElementById('k-max-bet').value) || 250.0
+  };
+  if (!keyObj.api_key_id || !keyObj.private_key_pem) {
+    alert('Please fill both API Key ID and Private Key PEM.');
+    return;
+  }
+  const btn = document.getElementById('btn-save-keys');
+  const orig = btn.textContent;
+  btn.textContent = 'SAVING...';
+  btn.classList.add('loading');
+  try {
+    const res = await fetch('/api/set_kalshi_keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(keyObj)
+    });
+    if (res.ok) {
+      btn.textContent = 'SAVED — FINDING GAME...';
+      const mres = await fetch('/api/kalshi_markets');
+      if (mres.ok) {
+        const mdata = await mres.json();
+        if (mdata.status === 'success' && mdata.market) {
+          applyKalshiPlayersToUi(mdata.market.player_a, mdata.market.player_b, mdata.market.title || '');
+          btn.textContent = 'BOT LINKED';
+          markTradesActive();
+          runSimulation();
+        } else {
+          btn.textContent = 'NO MARKETS';
+          alert(mdata.message || 'No open tennis markets found.');
+        }
+      }
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('loading'); }, 3000);
+    } else {
+      btn.textContent = 'ERROR';
+      setTimeout(() => { btn.textContent = orig; btn.classList.remove('loading'); }, 2000);
+    }
+  } catch (err) {
+    btn.textContent = 'ERROR';
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove('loading'); }, 2000);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   STOP TRADES
+══════════════════════════════════════════════════════════ */
+let tradesRunning = false;
+async function stopTrades() {
+  const btn = document.getElementById('btn-stop-trades');
+  if (!tradesRunning) return;
+  btn.textContent = 'STOPPING...';
+  try {
+    await fetch('/api/stop_bot', { method: 'POST' });
+    tradesRunning = false;
+    btn.textContent = 'TRADES STOPPED';
+    btn.classList.remove('active');
+    document.getElementById('sys-status').textContent = 'STOPPED';
+    document.getElementById('status-dot').className = '';
+    setTimeout(() => { btn.textContent = 'STOP TRADES'; }, 3000);
+  } catch (e) {
+    btn.textContent = 'STOP TRADES';
+  }
+}
+function markTradesActive() {
+  tradesRunning = true;
+  const btn = document.getElementById('btn-stop-trades');
+  btn.classList.add('active');
+  btn.textContent = 'STOP TRADES';
+}
+
+/* ══════════════════════════════════════════════════════════
+   HF TRADING MODE
+══════════════════════════════════════════════════════════ */
+let currentMode = 'normal';
+
+function applyModeUI(mode) {
+  currentMode = mode;
+  const btn = document.getElementById('btn-hf-mode');
+  const statusCell = document.getElementById('st-trade-mode');
+  if (mode === 'hf') {
+    btn.textContent = 'HF MODE: ON';
+    btn.classList.add('hf-active');
+    btn.classList.remove('secondary');
+    if (statusCell) statusCell.textContent = 'HIGH-FREQ';
+  } else {
+    btn.textContent = 'HF MODE: OFF';
+    btn.classList.remove('hf-active');
+    btn.classList.add('secondary');
+    if (statusCell) statusCell.textContent = 'NORMAL';
+  }
+}
+
+async function toggleHfMode() {
+  const next = currentMode === 'hf' ? 'normal' : 'hf';
+  try {
+    const res = await fetch('/api/set_trading_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: next }),
+    });
+    if (res.ok) applyModeUI(next);
+  } catch (e) { console.error(e); }
+}
+
+async function syncTradingMode() {
+  try {
+    const res = await fetch('/api/get_trading_mode');
+    if (res.ok) {
+      const data = await res.json();
+      applyModeUI(data.mode || 'normal');
+    }
+  } catch (e) {}
+}
+
+/* ══════════════════════════════════════════════════════════
+   3D ALPHA SURFACE
+══════════════════════════════════════════════════════════ */
+function initSurface(winProbA) {
+  const el = document.getElementById('surface-plot');
+  const p = winProbA || 0.5;
+
+  // Axes: market prob (x), model edge (y), ROI (z)
+  const mktProbs = [], edges = [], zRows = [];
+  const steps = 30;
+  for (let i = 0; i <= steps; i++) mktProbs.push(+(0.1 + (i / steps) * 0.8).toFixed(3));
+  for (let j = 0; j <= steps; j++) edges.push(+(j / steps * 0.35).toFixed(3));
+
+  for (let j = 0; j <= steps; j++) {
+    const row = [];
+    const modelProb = Math.min(0.99, Math.max(0.01, p + edges[j]));
+    for (let i = 0; i <= steps; i++) {
+      const mkt = mktProbs[i];
+      // Kelly-weighted expected ROI: (modelProb - mkt) / mkt * kelly_fraction
+      const kelly = Math.max(0, (modelProb - mkt) / mkt) * 0.25;
+      const roi = kelly * (modelProb / mkt - 1) * 100;
+      row.push(+roi.toFixed(3));
+    }
+    zRows.push(row);
+  }
+
+  const trace = {
+    type: 'surface',
+    x: mktProbs,
+    y: edges,
+    z: zRows,
+    colorscale: [
+      [0,   '#111111'],
+      [0.3, '#333333'],
+      [0.6, '#888888'],
+      [1,   '#f0f0f0'],
+    ],
+    contours: {
+      z: { show: true, usecolormap: false, project: { z: false }, color: '#333', width: 1 }
+    },
+    showscale: false,
+    opacity: 0.92,
+  };
+
+  const layout = {
+    paper_bgcolor: '#080808',
+    plot_bgcolor:  '#080808',
+    margin: { l: 0, r: 0, t: 0, b: 0 },
+    scene: {
+      bgcolor: '#080808',
+      xaxis: { title: { text: 'MKT PROB', font: { color: '#555', family: 'Space Mono', size: 9 } }, gridcolor: '#1e1e1e', zerolinecolor: '#2a2a2a', tickfont: { color: '#555', size: 8 } },
+      yaxis: { title: { text: 'MODEL EDGE', font: { color: '#555', family: 'Space Mono', size: 9 } }, gridcolor: '#1e1e1e', zerolinecolor: '#2a2a2a', tickfont: { color: '#555', size: 8 } },
+      zaxis: { title: { text: 'ROI %', font: { color: '#555', family: 'Space Mono', size: 9 } }, gridcolor: '#1e1e1e', zerolinecolor: '#2a2a2a', tickfont: { color: '#555', size: 8 } },
+      camera: { eye: { x: 1.6, y: -1.6, z: 1.0 } },
+    },
+    font: { family: 'Space Mono', color: '#888' },
+  };
+
+  Plotly.react(el, [trace], layout, { displayModeBar: false, responsive: true });
+}
+
+/* ══════════════════════════════════════════════════════════
+   BOT LOG STREAM
+══════════════════════════════════════════════════════════ */
+function startBotLogStream() {
+  setInterval(async () => {
+    try {
+      const res = await fetch('/api/bot_log');
+      if (res.ok) {
+        const data = await res.json();
+        const el = document.getElementById('log-list');
+        el.textContent = data.log;
+        el.scrollTop = el.scrollHeight;
+      }
+    } catch (e) {}
+  }, 1000);
+}
+
+/* ══════════════════════════════════════════════════════════
+   LIVE STATE POLLING
+══════════════════════════════════════════════════════════ */
+function startLiveStatePolling() {
+  setInterval(async () => {
+    if (isFetching) return;
+    const a = document.getElementById('inp-a').value.trim();
+    const b = document.getElementById('inp-b').value.trim();
+    if (!a || !b) return;
+    try {
+      const res = await fetch('/api/live_state');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data.ok) return;
+
+      if (data.player_a.toLowerCase() === a.toLowerCase() &&
+          data.player_b.toLowerCase() === b.toLowerCase()) {
+        document.getElementById('elo-a').textContent = (data.elo_a || 0).toLocaleString();
+        document.getElementById('elo-b').textContent = (data.elo_b || 0).toLocaleString();
+        document.getElementById('pprob-a').textContent = (data.win_prob_a * 100).toFixed(1) + '%';
+        document.getElementById('pprob-b').textContent = (data.win_prob_b * 100).toFixed(1) + '%';
+        document.getElementById('pbar-a').style.width = (data.win_prob_a * 100) + '%';
+        document.getElementById('pbar-b').style.width = (data.win_prob_b * 100) + '%';
+      } else {
+        document.getElementById('inp-a').value = data.player_a;
+        document.getElementById('inp-b').value = data.player_b;
+        runSimulation();
+      }
+    } catch (e) {}
+  }, 2500);
+}
+
+/* ══════════════════════════════════════════════════════════
+   INIT
+══════════════════════════════════════════════════════════ */
+window.addEventListener('load', async () => {
+  initMarkovDiagram();
+  initSurface(0.5);
+  await updateKalshiEnvUI();
+  await syncTradingMode();
+  startBotLogStream();
+  startLiveStatePolling();
+  setInterval(syncTradingMode, 5000);
+
+  // Enter key triggers simulation
+  ['inp-a', 'inp-b'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', e => {
+      if (e.key === 'Enter') runSimulation();
+    });
+  });
+
+  // Try to load existing match state
+  try {
+    const st = await fetch('/api/kalshi_match_state');
+    if (st.ok) {
+      const j = await st.json();
+      if (j.ok && j.player_a && j.player_b) {
+        applyKalshiPlayersToUi(j.player_a, j.player_b, j.title || '');
+      }
+    }
+  } catch (e) {}
+
+  const a = document.getElementById('inp-a').value.trim();
+  const b = document.getElementById('inp-b').value.trim();
+  if (a && b) runSimulation();
+});
+</script>
+</body>
+</html>

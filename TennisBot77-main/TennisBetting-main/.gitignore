@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Logs
+*.log
+latency_metrics.csv
+
+# State / Data
+kalshi_match_state.json
+live_state.json
+trading_mode.json
+uploads/
+
+# Sensitive
+kalshi_keys.json
+
+# OS
+.DS_Store
+Thumbs.db

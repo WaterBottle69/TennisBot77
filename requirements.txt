@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+opencv-python
+beautifulsoup4
+aiohttp
+python-multipart
+cryptography
+certifi
+pandas
+numpy
+scipy
+plotly
+xgboost
+scikit-learn
+matplotlib
+seaborn

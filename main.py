@@ -291,29 +291,29 @@ async def process_match(
                 writer = csv.writer(_metrics_f)
                 pipeline_start = time.time()
 
-                # ── Upcoming-match guard ─────────────────────────────────────────
-                # While the match hasn't started yet, skip all trading logic so
-                # the worker slot stays available for truly live matches.
-                # After _MAX_UPCOMING_TICKS polls we release the slot; the
-                # background discovery loop will re-queue it when it goes live.
-                if not score_update.get("is_live"):
-                    _upcoming_ticks += 1
-                    if score_update.get("is_scheduled"):
-                        log.info(
-                            "[UPCOMING] %s vs %s — waiting for match to start "
-                            "(%d/%d polls)", player_a, player_b,
-                            _upcoming_ticks, _MAX_UPCOMING_TICKS,
-                        )
-                    if _upcoming_ticks >= _MAX_UPCOMING_TICKS:
-                        log.warning(
-                            "[%s] %s vs %s still not live after %d polls — "
-                            "releasing worker slot. Will be re-queued when live.",
-                            ticker, player_a, player_b, _upcoming_ticks,
-                        )
-                        return
-                    continue  # skip balance fetch / trading / CSV write
-                else:
-                    _upcoming_ticks = 0  # reset counter once match goes live
+            # ── Upcoming-match guard ─────────────────────────────────────────
+            # While the match hasn't started yet, skip all trading logic so
+            # the worker slot stays available for truly live matches.
+            # After _MAX_UPCOMING_TICKS polls we release the slot; the
+            # background discovery loop will re-queue it when it goes live.
+            if not score_update.get("is_live"):
+                _upcoming_ticks += 1
+                if score_update.get("is_scheduled"):
+                    log.info(
+                        "[UPCOMING] %s vs %s — waiting for match to start "
+                        "(%d/%d polls)", player_a, player_b,
+                        _upcoming_ticks, _MAX_UPCOMING_TICKS,
+                    )
+                if _upcoming_ticks >= _MAX_UPCOMING_TICKS:
+                    log.warning(
+                        "[%s] %s vs %s still not live after %d polls — "
+                        "releasing worker slot. Will be re-queued when live.",
+                        ticker, player_a, player_b, _upcoming_ticks,
+                    )
+                    return
+                continue  # skip balance fetch / trading / CSV write
+            else:
+                _upcoming_ticks = 0  # reset counter once match goes live
 
                 if score_update.get("is_live"):
                     lms.update(score_update)
@@ -632,10 +632,22 @@ async def process_match(
                 eval_latency = (eval_start - pipeline_start) * 1000
                 kelly_mult = adaptive.kelly_multiplier if adaptive else 1.0
 
+                # Determine live/stale status FIRST — must be done before any order logic.
+                market_is_active = market.get("active", True)
+                is_live_match = market_is_active and feed_status == "live"
+
+                if feed_status == "stale" and market_is_active:
+                    log.warning(
+                        "[SCORE-FEED] STALE — no live score for %s vs %s. "
+                        "Trading BLOCKED until live score resumes.",
+                        player_a, player_b,
+                    )
+
                 # ── Predictive limit orders (placed BEFORE the next point) ────────────
                 # Cancel any limits that are now stale (point already played / price moved).
                 # Then place a fresh resting limit at the anticipated post-point price.
-                if score_update.get("is_live"):
+                # Only place new predictive limits when we have a confirmed live feed.
+                if score_update.get("is_live") and is_live_match:
                     await bets.cancel_stale_limits(market["yes_price"])
                     await bets.place_predictive_limit_order(
                         market=market,
@@ -646,17 +658,6 @@ async def process_match(
                     )
 
                 try:
-                    # is_live_match: ONLY trade when we have confirmed live score data.
-                    # Stale = no live source (LiveScore + ESPN) found the match.
-                    # Trading blind on stale data risks acting on a finished/mispriced market.
-                    market_is_active = market.get("active", True)
-                    is_live_match = market_is_active and feed_status == "live"
-                    if feed_status == "stale" and market_is_active:
-                        log.warning(
-                            "[SCORE-FEED] STALE — no live score for %s vs %s. "
-                            "Trading BLOCKED until live score resumes.",
-                            player_a, player_b,
-                        )
                     # Attach full signal context for convergence gate + TradeTracker
                     win_prob.update({
                         "pts_vs_rank_edge":         _pts_vs_rank_edge,

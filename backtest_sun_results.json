@@ -1,0 +1,99 @@
+{
+  "total_matches_analysed": 9860,
+  "venues_covered": 41,
+  "years": [
+    "2018",
+    "2019",
+    "2020",
+    "2021",
+    "2022",
+    "2023",
+    "2024"
+  ],
+  "sun_categories": {
+    "LOW": 6142,
+    "MODERATE": 3116,
+    "GLARE": 602
+  },
+  "group_stats": {
+    "GLARE": {
+      "n": 602,
+      "mean": 0.7079,
+      "stdev": 0.0584,
+      "label": "GLARE"
+    },
+    "MODERATE": {
+      "n": 3116,
+      "mean": 0.7134,
+      "stdev": 0.0638,
+      "label": "MODERATE"
+    },
+    "LOW": {
+      "n": 6142,
+      "mean": 0.7083,
+      "stdev": 0.0664,
+      "label": "LOW"
+    }
+  },
+  "glare_vs_low": {
+    "mean_diff_1stSvPts": -0.0004,
+    "cohens_d": -0.0049,
+    "welch_t_pvalue": 0.8985,
+    "mannwhitney_pvalue": 0.8807,
+    "elevation_correlation": -0.0138
+  },
+  "implied_alpha": {
+    "implied_p_serve_penalty": 0.0003,
+    "implied_win_prob_delta": 0.0006,
+    "signal_statistically_sig": false
+  },
+  "surface_breakdown": {
+    "Clay": {
+      "glare_n": 142,
+      "glare_mean": 0.6769,
+      "low_n": 2150,
+      "low_mean": 0.6799,
+      "delta": -0.003,
+      "cohens_d": -0.0459,
+      "p_value": 0.5733
+    },
+    "Grass": {
+      "glare_n": 15,
+      "glare_mean": 0.7701,
+      "low_n": 138,
+      "low_mean": 0.7413,
+      "delta": 0.0288,
+      "cohens_d": 0.5713,
+      "p_value": 0.0064
+    },
+    "Hard": {
+      "glare_n": 445,
+      "glare_mean": 0.7158,
+      "low_n": 3854,
+      "low_mean": 0.7229,
+      "delta": -0.0072,
+      "cohens_d": -0.1166,
+      "p_value": 0.0094
+    }
+  },
+  "top_glare_venues": {
+    "n": {
+      "New York": 381,
+      "B\u00e5stad": 100,
+      "Doha": 40,
+      "Hamburg": 39,
+      "Delray Beach": 24,
+      "London": 15,
+      "M\u00fcnchen": 3
+    },
+    "mean_1stpct": {
+      "New York": 0.7173916276759602,
+      "B\u00e5stad": 0.6759309265270804,
+      "Doha": 0.7012081857701946,
+      "Hamburg": 0.6760046783817606,
+      "Delray Beach": 0.7141001650235929,
+      "London": 0.7700584556059454,
+      "M\u00fcnchen": 0.7215969241194711
+    }
+  }
+}

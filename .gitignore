@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+venv/
+.venv/
+.env
+
+# Virtual environments
+test_venv/
+
+# Logs & runtime state
+*.log
+latency_metrics.csv
+kalshi_match_state.json
+live_state.json
+adaptive_state.json
+trading_mode.json
+uploads/
+
+# Secrets — never commit API keys
+kalshi_keys.json
+
+# Generated reports & outputs
+*.pdf
+static/alpha_surface.html
+monte_carlo_results.html
+gpu_backtest_results.json
+
+# Large dataset — too big for GitHub (647MB), retrain locally
+pytorch_tennis_dataset.joblib
+
+# Cache / IDE
+.pytest_cache/
+.DS_Store
+Thumbs.db
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,238 @@
+{
+  "generated": "2026-04-18T09:56:51.194039",
+  "consensus_params": {
+    "min_edge": 0.1,
+    "kelly_frac": 0.05,
+    "vig": 0.05
+  },
+  "fold_params": [
+    {
+      "fold": "EXP_2000-2005\u21922006",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2006\u21922007",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2007\u21922008",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2008\u21922009",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2009\u21922010",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2010\u21922011",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2011\u21922012",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2012\u21922013",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2013\u21922014",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2014\u21922015",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2015\u21922016",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2016\u21922017",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2017\u21922018",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2018\u21922019",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2019\u21922020",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2020\u21922021",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2021\u21922022",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2022\u21922023",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "EXP_2000-2023\u21922024",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2000-2005\u21922006",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2001-2006\u21922007",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2002-2007\u21922008",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2003-2008\u21922009",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2004-2009\u21922010",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2005-2010\u21922011",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2006-2011\u21922012",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2007-2012\u21922013",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2008-2013\u21922014",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2009-2014\u21922015",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2010-2015\u21922016",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2011-2016\u21922017",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2012-2017\u21922018",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2013-2018\u21922019",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2014-2019\u21922020",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2015-2020\u21922021",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2016-2021\u21922022",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2017-2022\u21922023",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    },
+    {
+      "fold": "ROLL_2018-2023\u21922024",
+      "best_min_edge": 0.1,
+      "best_kelly_frac": 0.05,
+      "best_vig": 0.05
+    }
+  ]
+}

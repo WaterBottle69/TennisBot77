@@ -1,0 +1,11 @@
+{
+  "walk_forward": [],
+  "ablation": [],
+  "permutation": {
+    "real_brier": null,
+    "null_mean": null,
+    "null_std": null,
+    "p_value": null
+  },
+  "stratified": []
+}

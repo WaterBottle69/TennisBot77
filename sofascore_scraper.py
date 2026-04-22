@@ -19,9 +19,12 @@ _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json",
     "Referer": "https://www.sofascore.com/",
+    "x-locale": "en_INT",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
 }
 
 _URL = "https://api.sofascore.com/api/v1/sport/tennis/events/live"

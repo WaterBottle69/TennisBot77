@@ -6,9 +6,11 @@ Integrates: Kalshi, ATP stats (tennisstats scraper), Markov chain engine, parall
 import os
 import asyncio
 import logging
+import logging.handlers
 import time
 import csv
 import json
+import datetime
 from config import Config
 from markov_engine import NonIIDLiveMatchState
 from bayesian_updater import BayesianServeProbUpdater, GaussianSkillDrift
@@ -45,8 +47,10 @@ def _setup_logging():
         return  # Already configured (e.g. when imported by server.py)
     root.setLevel(logging.INFO)
 
-    # File handler only — avoids double-write when stdout is also redirected to bot.log
-    fh = logging.FileHandler(BOT_LOG_PATH, mode="a", encoding="utf-8")
+    # Rotating file handler: 50 MB per file, keep 10 backups (~500 MB max)
+    fh = logging.handlers.RotatingFileHandler(
+        BOT_LOG_PATH, mode="a", maxBytes=50 * 1024 * 1024, backupCount=10, encoding="utf-8"
+    )
     fh.setFormatter(_fmt)
     root.addHandler(fh)
 
@@ -252,8 +256,15 @@ async def process_match(
     _pts_vs_rank_raw       = 0.0
     _weather_data          = None
 
-    # Bayesian live-state fusion: updates p_serve estimate using Beta-Binomial conjugacy
-    _bayes_serve = BayesianServeProbUpdater(prior_mean=p_serve, concentration=50)
+    # Bayesian live-state fusion: seed prior from scraped serve stats so we
+    # converge in ~3 games instead of ~15.  Surface is initially "hard" (the
+    # most common surface); it is re-seeded once the venue is resolved below.
+    from prior_seeder import compute_serve_prior, reseed_for_surface
+    _bayes_prior_mean, _bayes_prior_conc = compute_serve_prior(p1_stats, surface="hard")
+    _bayes_serve = BayesianServeProbUpdater(
+        prior_mean=_bayes_prior_mean, concentration=_bayes_prior_conc
+    )
+    _bayes_surface_reseeded = False   # set True once venue surface is known
     _skill_drift = GaussianSkillDrift(drift_std=0.5, concentration_decay=0.98)
     # Live hold-rate tracking for dynamic Markov parameter updates
     _serve_pts_won   = 0
@@ -262,12 +273,22 @@ async def process_match(
     _atp_tick        = 0    # counts live ticks; triggers ATP stat refresh every 30
     _live_hold_rate  = 0.5  # empirical server hold rate from ATP stats (default 50%)
 
-    metrics_path = os.path.join(BASE_DIR, "latency_metrics.csv")
-    try:
-        with open(metrics_path, mode="a", newline="") as f:
-            writer = csv.writer(f)
+    def _open_metrics_file():
+        day = datetime.date.today().strftime("%Y%m%d")
+        path = os.path.join(BASE_DIR, f"latency_metrics_{day}.csv")
+        return open(path, mode="a", newline=""), day
 
-            async for score_update in poll_live_score_real(player_a, player_b, config, interval=poll_interval):
+    _metrics_f, _metrics_day = _open_metrics_file()
+    try:
+        writer = csv.writer(_metrics_f)
+
+        async for score_update in poll_live_score_real(player_a, player_b, config, interval=poll_interval):
+            # Rotate metrics file when the calendar day rolls over
+            _today = datetime.date.today().strftime("%Y%m%d")
+            if _today != _metrics_day:
+                _metrics_f.close()
+                _metrics_f, _metrics_day = _open_metrics_file()
+                writer = csv.writer(_metrics_f)
                 pipeline_start = time.time()
 
                 # ── Upcoming-match guard ─────────────────────────────────────────
@@ -425,6 +446,26 @@ async def process_match(
                                     )
                                 except Exception as _pe:
                                     log.warning("[PHYS] adjustment failed: %s", _pe)
+
+                            # ── Bayesian prior reseed with actual surface ─────────
+                            # Once _surf is known, replace the initial "hard" prior
+                            # with a surface-calibrated one (clay/grass/indoor).
+                            if not _bayes_surface_reseeded and _venue is not None:
+                                _bayes_surface_reseeded = True
+                                _resolved_surf = (_venue.court_surface or "hard")
+                                try:
+                                    reseed_for_surface(
+                                        _bayes_serve, p1_stats,
+                                        surface=_resolved_surf, is_server=True,
+                                    )
+                                    log.info(
+                                        "[PRIOR-RESEED] %s Bayesian prior updated for "
+                                        "surface=%s → posterior=%.4f",
+                                        player_a, _resolved_surf,
+                                        _bayes_serve.get_posterior_mean(),
+                                    )
+                                except Exception as _pre:
+                                    log.warning("[PRIOR-RESEED] failed: %s", _pre)
 
                     # Detect who won the last point by comparing current vs previous
                     # game-point tuple. Only count when exactly one side advanced by 1
@@ -709,6 +750,7 @@ async def process_match(
     except asyncio.CancelledError:
         log.info(f"Session cancelled for {ticker}.")
     finally:
+        _metrics_f.close()
         log.info(f"Session ended for {ticker}. Final positions:")
         bets.print_summary()
 
@@ -751,8 +793,13 @@ async def worker(
         ws_fills_task = asyncio.create_task(kalshi.stream_user_fills(lambda _msg: None))
 
         try:
-            await process_match(match, kalshi, history, bets, config,
-                               adaptive=adaptive, location_engine=location_engine)
+            await asyncio.wait_for(
+                process_match(match, kalshi, history, bets, config,
+                              adaptive=adaptive, location_engine=location_engine),
+                timeout=8 * 3600,  # 8-hour hard cap — releases worker slot if match stalls
+            )
+        except asyncio.TimeoutError:
+            log.warning("[WORKER] Match %s exceeded 8-hour timeout — releasing worker slot.", ticker)
         except Exception as e:
             log.error(f"Error processing match {ticker}: {e}")
         finally:
@@ -884,6 +931,7 @@ async def run_game_session():
 
     finally:
         await kalshi.close()
+        await history.close()
 
 
 if __name__ == "__main__":

@@ -99,7 +99,7 @@ class ATPStatsCentreScraper:
         if not _CS_AVAIL:
             return None
 
-        loop   = asyncio.get_event_loop()
+        loop   = asyncio.get_running_loop()
         sc     = cloudscraper.create_scraper(
             browser={"browser": "chrome", "platform": "windows", "mobile": False}
         )

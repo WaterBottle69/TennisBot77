@@ -75,27 +75,42 @@ class TennisStatsScraper:
 
     BASE = "https://tennisstats.com"
 
+    _RANKINGS_TTL = 3600.0    # re-fetch rankings at most once per hour
+    _PROFILE_TTL  = 86400.0   # re-fetch player profiles at most once per day
+
     def __init__(self):
         self._rankings: dict | None = None   # slug → data dict, populated lazily
+        self._rankings_fetched_at: float = 0.0
         self._profile_cache: dict = {}       # slug → profile dict
+        self._profile_cache_ts: dict = {}    # slug → fetch timestamp
+        self._session: aiohttp.ClientSession | None = None
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
+            self._session = aiohttp.ClientSession(headers=_HEADERS, connector=connector)
+        return self._session
+
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     async def _get(self, url: str):
         """Fetch a URL and return its HTML, or None on failure."""
         try:
-            connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
-            async with aiohttp.ClientSession(
-                headers=_HEADERS, connector=connector
-            ) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                    if r.status == 200:
-                        return await r.text()
-                    log.warning("HTTP %s for %s", r.status, url)
+            session = self._get_session()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                if r.status == 200:
+                    return await r.text()
+                log.warning("HTTP %s for %s", r.status, url)
         except Exception as exc:
             log.error("Fetch failed for %s: %s", url, exc)
+            self._session = None  # recreate on next call
         return None
 
     # ------------------------------------------------------------------
@@ -110,7 +125,9 @@ class TennisStatsScraper:
         each value is a basic data dict with ranking, elo, career W-L etc.
         Cached in memory for the lifetime of this scraper instance.
         """
-        if self._rankings is not None:
+        import time as _time
+        if (self._rankings is not None
+                and _time.time() - self._rankings_fetched_at < self._RANKINGS_TTL):
             return self._rankings
 
         rankings: dict = {}
@@ -144,9 +161,12 @@ class TennisStatsScraper:
                 elo_match = re.search(r"\b(\d{1,2},\d{3})\b", raw)
                 elo = int(elo_match.group(1).replace(",", "")) if elo_match else 0
 
-                # Career W-L: two consecutive numbers separated by whitespace
-                # (wins then losses) — appears after the elo score
-                wl_match = re.search(r"\b(\d{1,3})\s+(\d{1,3})\b", raw)
+                # Career W-L: two consecutive integers after the ELO field
+                # Raw format: "... <elo> <wins> <losses> <aces> ..."
+                # We anchor the search to start after the ELO match so we don't
+                # accidentally match the age field or the ELO digits themselves.
+                _wl_search_start = elo_match.end() if elo_match else 0
+                wl_match = re.search(r"\b(\d{1,3})\s+(\d{1,3})\b", raw[_wl_search_start:])
                 wins   = int(wl_match.group(1)) if wl_match else 0
                 losses = int(wl_match.group(2)) if wl_match else 0
                 win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.5
@@ -171,8 +191,10 @@ class TennisStatsScraper:
                     "break_pts_won":  None,
                 }
 
+        import time as _time
         log.info("Loaded %d players from tennisstats.com ATP/WTA rankings", len(rankings))
         self._rankings = rankings
+        self._rankings_fetched_at = _time.time()
         return rankings
 
     # ------------------------------------------------------------------
@@ -184,8 +206,10 @@ class TennisStatsScraper:
         Fetch the detailed profile page for one player and return a merged
         data dict (ranking data + profile enrichments).
         """
+        import time as _t
         if slug in self._profile_cache:
-            return self._profile_cache[slug]
+            if _t.time() - self._profile_cache_ts.get(slug, 0) < self._PROFILE_TTL:
+                return self._profile_cache[slug]
 
         url = f"{self.BASE}/players/{slug}"
         html = await self._get(url)
@@ -261,21 +285,29 @@ class TennisStatsScraper:
         if pm_m:
             result["prize_money"] = "$" + pm_m.group(1)
 
-        # Height
-        ht_m = re.search(r"([\d\.]+)m", text)
+        # Height — only match realistic player heights (1.50m–2.10m) to avoid
+        # false positives on prize money ("$53m"), dates, or other numeric text.
+        ht_m = re.search(r"\b(1\.[5-9]\d|2\.[0-1]\d)\s*m\b", text)
         if ht_m:
             try:
-                # Convert 1.83m -> 183cm
                 result["height_cm"] = int(float(ht_m.group(1)) * 100)
             except ValueError:
                 pass
-                
-        # Age
-        # Often appears right before the W-L record or Career Winnings, 
-        # or we just look for Age \d+
-        age_m = re.search(r"Hand\s+(\d+)", text)
-        if age_m:
-            result["age"] = int(age_m.group(1))
+
+        # Age — try several patterns in priority order; validate range 15–50
+        _age_val = None
+        for _age_pat in [
+            r"\bAge\s*:?\s*(\d{1,2})\b",        # "Age: 21" or "Age 21"
+            r"(\d{1,2})\s+years?\s+old\b",        # "21 years old"
+        ]:
+            _m = re.search(_age_pat, text, re.I)
+            if _m:
+                _v = int(_m.group(1))
+                if 15 <= _v <= 50:
+                    _age_val = _v
+                    break
+        if _age_val is not None:
+            result["age"] = _age_val
             
         # Handedness
         if "Right-handed" in text or "Right-Handed" in text:
@@ -284,6 +316,7 @@ class TennisStatsScraper:
             result["hand"] = "L"
 
         self._profile_cache[slug] = result
+        self._profile_cache_ts[slug] = _t.time()
         return result
 
     async def fetch_recent_matches(self, slug: str, n: int = 10) -> list:

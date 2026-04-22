@@ -114,13 +114,16 @@ class WeatherData:
     All fields are fetched and stored; NONE are currently wired into the model.
     Reserved for Phase-2 physics engine (ball drag, bounce coefficient, etc.).
     """
-    temperature_c:    float = 20.0
-    humidity_pct:     float = 50.0
-    wind_speed_kmh:   float = 0.0
-    wind_direction_deg: float = 0.0   # degrees clockwise from N
-    pressure_hpa:     float = 1013.0
-    conditions:       str   = "unknown"
-    fetched_at:       float = field(default_factory=time.time)
+    temperature_c:         float = 20.0
+    apparent_temperature_c:float = 20.0   # "feels like" — same as temp if not available
+    humidity_pct:          float = 50.0
+    relative_humidity_pct: float = 50.0   # alias kept for tracker compatibility
+    wind_speed_kmh:        float = 0.0
+    wind_direction_deg:    float = 0.0    # degrees clockwise from N
+    precipitation_mm:      float = 0.0
+    pressure_hpa:          float = 1013.0
+    conditions:            str   = "unknown"
+    fetched_at:            float = field(default_factory=time.time)
 
     # ── Future modifiers (not computed yet) ────────────────────────────────────
     _ball_drag_factor:     float = 1.0   # altitude-adjusted air resistance
@@ -541,19 +544,24 @@ class LocationEngine:
                     return WeatherData()
                 raw = await r.json(content_type=None)
 
-            cc     = raw.get("current_condition", [{}])[0]
-            temp_c = float(cc.get("temp_C", 20))
-            humid  = float(cc.get("humidity", 50))
-            wind_k = float(cc.get("windspeedKmph", 0))
-            wind_d = float(cc.get("winddirDegree", 0))
-            press  = float(cc.get("pressure", 1013))
-            desc   = (cc.get("weatherDesc") or [{"value": "unknown"}])[0].get("value", "unknown")
+            cc        = raw.get("current_condition", [{}])[0]
+            temp_c    = float(cc.get("temp_C", 20))
+            feels_c   = float(cc.get("FeelsLikeC", temp_c))
+            humid     = float(cc.get("humidity", 50))
+            wind_k    = float(cc.get("windspeedKmph", 0))
+            wind_d    = float(cc.get("winddirDegree", 0))
+            press     = float(cc.get("pressure", 1013))
+            precip    = float(cc.get("precipMM", 0.0))
+            desc      = (cc.get("weatherDesc") or [{"value": "unknown"}])[0].get("value", "unknown")
 
             data = WeatherData(
                 temperature_c=temp_c,
+                apparent_temperature_c=feels_c,
                 humidity_pct=humid,
+                relative_humidity_pct=humid,
                 wind_speed_kmh=wind_k,
                 wind_direction_deg=wind_d,
+                precipitation_mm=precip,
                 pressure_hpa=press,
                 conditions=desc,
             )

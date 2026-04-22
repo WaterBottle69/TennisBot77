@@ -93,16 +93,15 @@ class ESPNTennisScorer:
                     log.warning("[ESPN] HTTP %s for %s", r.status, url)
                     return cached_data
                 data = await r.json()
+            matches = self._parse(data)
+            self._cache[url] = (now, matches)
+            if matches:
+                log.info("[ESPN] %d live match(es) found", len(matches))
+            return matches
         except Exception as exc:
-            log.warning("[ESPN] Fetch failed (%s): %s", url, exc)
+            log.warning("[ESPN] Fetch/parse failed (%s): %s", url, exc)
             self._session = None
             return cached_data
-
-        matches = self._parse(data)
-        self._cache[url] = (now, matches)
-        if matches:
-            log.info("[ESPN] %d live match(es) found", len(matches))
-        return matches
 
     def _parse(self, data: dict) -> List[Dict]:
         result = []

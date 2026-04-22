@@ -20,6 +20,9 @@ class HistoricalAnalyzer:
         self.cfg = config
         self._scraper = TennisStatsScraper()
 
+    async def close(self):
+        await self._scraper.close()
+
     async def get_h2h_matchup(self, player_a: str, player_b: str) -> Dict[str, Any]:
         """
         Build a structure compatible with EloEngine.seed_from_history() using
@@ -64,18 +67,23 @@ class HistoricalAnalyzer:
         return result
 
     async def get_live_atp_stats(self, player_a: str, player_b: str,
-                                  stats_url: str = None) -> dict:
+                                  stats_url: str = None,
+                                  sportradar_stats: dict = None) -> dict:
         """
         Fetch real-time ATP service statistics.
 
         Priority:
+          0. SportRadar WebSocket payload (passed in directly — zero latency).
           1. ATP Stats Centre page (stats_url or auto-discovered via GetInitialScores).
-             This is the page the user referenced:
-             https://www.atptour.com/en/scores/stats-centre/live/{year}/{tid}/{mid}
           2. ATP GetInitialScores AJAX fallback (inline JSON parse).
 
         Returns dict with normalized service metrics, or empty dict on failure.
         """
+        # 0. SportRadar stats injected directly from the WS stream (fastest path)
+        if sportradar_stats and any(v for v in sportradar_stats.values()):
+            log.debug("[ATP] Using SportRadar live stats for %s vs %s", player_a, player_b)
+            return sportradar_stats
+
         # 1. Try the Stats Centre scraper (handles URL discovery + HTML parsing)
         try:
             stats = await atp_stats_scraper.fetch_stats(player_a, player_b,
@@ -95,7 +103,7 @@ class HistoricalAnalyzer:
             scraper = cloudscraper.create_scraper(
                 browser={"browser": "chrome", "platform": "windows", "mobile": False}
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             resp = await loop.run_in_executor(
                 None, lambda: scraper.get(url, timeout=12)
             )

@@ -8,7 +8,6 @@ import re
 import json
 import textwrap
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 def normalize_kalshi_pem(pem: str) -> str:
@@ -49,18 +48,22 @@ local_api_key = os.getenv("KALSHI_API_KEY_ID", "")
 local_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM", "")
 local_max_bet = 250.0  # default allocation
 local_use_prod = os.getenv("KALSHI_USE_PROD", "false").lower() == "true"
+local_sportradar_key = os.getenv("SPORTRADAR_API_KEY", "")
+_kd: dict = {}
 if os.path.exists("kalshi_keys.json"):
     try:
         with open("kalshi_keys.json", "r") as f:
-            kd = json.load(f)
-            local_api_key = kd.get("api_key_id", local_api_key)
-            local_max_bet = float(kd.get("max_bet_usdc", 250.0))
-            raw_pem = kd.get("private_key_pem", local_pem)
+            _kd = json.load(f)
+            local_api_key = _kd.get("api_key_id", local_api_key)
+            local_max_bet = float(_kd.get("max_bet_usdc", 250.0))
+            raw_pem = _kd.get("private_key_pem", local_pem)
             if raw_pem:
                 local_pem = normalize_kalshi_pem(raw_pem)
             # Allow kalshi_keys.json to control prod vs demo
-            if "use_prod" in kd:
-                local_use_prod = bool(kd["use_prod"])
+            if "use_prod" in _kd:
+                local_use_prod = bool(_kd["use_prod"])
+            if _kd.get("sportradar_api_key"):
+                local_sportradar_key = _kd["sportradar_api_key"]
     except Exception:
         pass
 
@@ -254,4 +257,13 @@ class Config:
     LIVESCORE_API_URL: str      = "https://prod-cdn-mev-api.livescore.com/v1/api/app/live/tennis/-5?countryCode=US&locale=en"
     LIVESCORE_DAILY_URL: str    = "https://prod-cdn-mev-api.livescore.com/v1/api/app/date/tennis/{date}/0?countryCode=US&locale=en"
     LIVESCORE_POLL_INTERVAL: float = 10.0  # seconds between polls
+
+    # -- SportRadar Tennis v3 -------------------------------------------------
+    # Free sandbox trial: https://developer.sportradar.com
+    # Add your key to kalshi_keys.json as "sportradar_api_key": "YOUR_KEY"
+    # or set the SPORTRADAR_API_KEY environment variable.
+    SPORTRADAR_API_KEY: str     = local_sportradar_key
+    SPORTRADAR_ENABLED: bool    = True   # set False to skip WS and fall back to polling
+    SPORTRADAR_WS_URL: str      = "wss://api.sportradar.com/tennis/trial/v3/en/stream/events/subscribe"
+    SPORTRADAR_REST_BASE: str   = "https://api.sportradar.com/tennis/trial/v3/en"
 

@@ -222,32 +222,59 @@ class LiveScoreScraper:
 
 async def poll_live_score_real(player_a: str, player_b: str, config: Config, interval: float = 10.0):
     """
-    Indefinitely polls four live-score sources in priority order.
+    Indefinitely yields live-score updates for a match, using sources in
+    priority order:
 
-    Priority order:
-      1. LiveScore CDN live feed — primary, lowest latency (Challengers/minor ATP).
-      2. ESPN scoreboard         — covers ALL ATP 250/500/1000/Slams that LiveScore misses.
-      3. SofaScore               — covers ALL ATP/WTA/Challenger/ITF globally (broadest coverage).
-      4. LiveScore daily schedule — catches NS (Not Started) upcoming matches.
-      5. Flashscore discovery   — secondary confirmation that a match exists.
+      1. SportRadar WebSocket push  — sub-second latency, official ATP/WTA data
+                                      (requires SPORTRADAR_API_KEY in kalshi_keys.json)
+      2. LiveScore CDN live feed    — primary polling fallback (Challengers/minor ATP)
+      3. ESPN scoreboard            — ATP 250/500/1000/Slams
+      4. SofaScore                  — broadest global coverage (ATP/WTA/Challenger/ITF)
+      5. LiveScore daily schedule   — catches NS (Not Started) upcoming matches
+      6. Flashscore discovery       — secondary confirmation that a match exists
 
     Stale = no source returned a live score. Bot will NOT trade when stale.
     """
     from espn_scraper import espn_scorer
     from sofascore_scraper import sofascore_scraper
+    from sportradar_scraper import SportRadarLiveStream
 
-    scraper = LiveScoreScraper(config)
+    scraper    = LiveScoreScraper(config)
     flashscore = FlashscoreDiscovery()
     consecutive_misses = 0
     _is_scheduled = False
 
+    # ── 1. SportRadar WebSocket (priority 1) ─────────────────────────────────
+    sr_key     = getattr(config, "SPORTRADAR_API_KEY", "")
+    sr_enabled = getattr(config, "SPORTRADAR_ENABLED", False)
+
+    if sr_enabled and sr_key:
+        log.info("[SPORTRADAR-WS] Starting WebSocket feed for %s vs %s", player_a, player_b)
+        sr_stream = SportRadarLiveStream(player_a, player_b, sr_key)
+        try:
+            async for update in sr_stream.listen():
+                scraper._last_live_hit = time.time()
+                yield update
+                # After each WS event, briefly yield control so the event loop
+                # can handle Kalshi / bet-manager tasks without blocking.
+                await asyncio.sleep(0)
+        except Exception as exc:
+            log.warning("[SPORTRADAR-WS] Stream terminated unexpectedly: %s — "
+                        "falling through to polling sources.", exc)
+        finally:
+            sr_stream.stop()
+        # If we reach here the WS ended (match over or permanent error).
+        # Fall through to polling so the bot doesn't go dark mid-session.
+        log.info("[SPORTRADAR-WS] WebSocket ended — switching to polling fallback.")
+
+    # ── 2–6. Polling fallback ────────────────────────────────────────────────
     while True:
         try:
             # Force cache invalidation after 3 misses to prevent serving stale CDN data.
             if consecutive_misses > 0 and consecutive_misses % 3 == 0:
                 scraper.invalidate_cache()
 
-            # ── 1. LiveScore CDN live feed ────────────────────────────────────
+            # ── 2. LiveScore CDN live feed ────────────────────────────────────
             live_matches = await scraper.fetch_live_scores()
             match = scraper.find_match(player_a, player_b, live_matches)
             if live_matches and not match:
@@ -258,7 +285,7 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
                     [(m["player_a"], m["player_b"]) for m in live_matches],
                 )
 
-            # ── 2. ESPN fallback (ATP 250/500/1000/Slams) ────────────────────
+            # ── 3. ESPN fallback (ATP 250/500/1000/Slams) ────────────────────
             if not match:
                 espn_matches = await espn_scorer.fetch_live()
                 match = scraper.find_match(player_a, player_b, espn_matches)
@@ -273,7 +300,7 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
                         len(espn_matches), player_a, player_b,
                     )
 
-            # ── 3. SofaScore fallback (broadest global coverage) ─────────────
+            # ── 4. SofaScore fallback (broadest global coverage) ─────────────
             if not match:
                 sofa_matches = await sofascore_scraper.fetch_live()
                 match = scraper.find_match(player_a, player_b, sofa_matches)
@@ -310,7 +337,7 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
                 await asyncio.sleep(interval)
                 continue
 
-            # ── 4. Daily schedule (every 3 misses) ───────────────────────────
+            # ── 5. Daily schedule (every 3 misses) ───────────────────────────
             if consecutive_misses % 3 == 0:
                 daily_matches = await scraper.fetch_all_today()
                 upcoming_match = scraper.find_match(player_a, player_b, daily_matches)
@@ -319,7 +346,7 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
                              player_a, player_b)
                 _is_scheduled = bool(upcoming_match)
 
-            # ── 5. Flashscore confirmation (every 6 misses) ──────────────────
+            # ── 6. Flashscore confirmation (every 6 misses) ──────────────────
             if not _is_scheduled and consecutive_misses % 6 == 0:
                 fs_id = await flashscore.find_match_id(player_a, player_b)
                 if fs_id:

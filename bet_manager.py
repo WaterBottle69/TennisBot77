@@ -201,6 +201,14 @@ class BetManager:
             log.info("Market inactive — skipping.")
             return
 
+        # Evict stale cooldown entries (older than 2 h) to prevent unbounded growth
+        _now_mono = time.monotonic()
+        if self._sell_cooldown:
+            self._sell_cooldown = {
+                k: v for k, v in self._sell_cooldown.items()
+                if _now_mono - v < 7200
+            }
+
         # Market prices
         yes_price = market["yes_price"]   # cost of 1 YES share
         no_price  = market["no_price"]    # cost of 1 NO share

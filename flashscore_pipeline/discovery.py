@@ -38,8 +38,11 @@ _HEADERS = {
     ),
     "Accept": "*/*",
     "Referer": "https://www.flashscore.com/",
-    "x-fsign": "SW9D1eY",  # Static client-side signature identified in browser session
+    "x-fsign": "SW9D1eY",  # Static client-side signature — may need rotation if 401
 }
+
+# How long (seconds) to pause Flashscore after receiving 401/403
+_BLOCK_BACKOFF = 1800.0  # 30 minutes
 
 
 class FlashscoreDiscovery:
@@ -53,11 +56,18 @@ class FlashscoreDiscovery:
         self._feed_cache: list = []   # Parsed list of all matches
         self._feed_ttl = cache_ttl
         self._feed_fetched_at = 0.0
+        self._blocked_until: float = 0.0  # epoch after which requests resume
+        self._block_logged: bool = False   # suppress repeated warnings
 
     async def _fetch_feed(self) -> list:
         """Fetch and parse the Flashscore tennis index feed."""
         import time
         now = time.time()
+
+        # Honour block window from previous 401/403 — no retries until backoff expires
+        if now < self._blocked_until:
+            return []
+
         if self._feed_cache and (now - self._feed_fetched_at) < self._feed_ttl:
             return self._feed_cache
 
@@ -65,12 +75,25 @@ class FlashscoreDiscovery:
             connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
             async with aiohttp.ClientSession(headers=_HEADERS, connector=connector) as session:
                 async with session.get(_FEED_URL, timeout=10) as resp:
-                    if resp.status != 200:
-                        log.debug(f"Flashscore feed HTTP {resp.status} (Optional Fallback Unreachable)")
+                    if resp.status in (401, 403):
+                        self._blocked_until = now + _BLOCK_BACKOFF
+                        if not self._block_logged:
+                            log.warning(
+                                "[FLASHSCORE] HTTP %s — x-fsign signature may be expired. "
+                                "Flashscore discovery disabled for %.0f min. "
+                                "Primary sources (LiveScore/ESPN/SofaScore) are unaffected.",
+                                resp.status, _BLOCK_BACKOFF / 60,
+                            )
+                            self._block_logged = True
                         return []
+                    if resp.status != 200:
+                        log.debug("[FLASHSCORE] HTTP %s — skipping (optional source)", resp.status)
+                        return []
+                    # Successful response — reset block state
+                    self._block_logged = False
                     raw = await resp.text(encoding="utf-8", errors="replace")
         except Exception as e:
-            log.error(f"Flashscore feed fetch error: {e}")
+            log.warning("[FLASHSCORE] Feed fetch error: %s", e)
             return []
 
         matches = self._parse_feed(raw)

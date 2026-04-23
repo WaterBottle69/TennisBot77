@@ -12,51 +12,7 @@ log = logging.getLogger(__name__)
 
 # --- ARCHITECTURE (Must match pytorch_model.py exactly) ---
 
-class TennisNet(nn.Module):
-    def __init__(self, num_players, embed_dim=32, seq_input_dim=4, rnn_hidden_dim=64, match_feat_dim=15, num_surfaces=3, num_tournaments=4):
-        super(TennisNet, self).__init__()
-        self.player_embedding = nn.Embedding(num_players + 1, embed_dim, padding_idx=0)
-        self.rnn = nn.LSTM(input_size=seq_input_dim, hidden_size=rnn_hidden_dim, batch_first=True, dropout=0.2, num_layers=1)
-        self.surface_embedding = nn.Embedding(num_surfaces + 1, 4, padding_idx=0)
-        self.tourney_embedding = nn.Embedding(num_tournaments + 1, 4, padding_idx=0)
-        fc_input_dim = 200 + match_feat_dim
-        self.fc = nn.Sequential(
-            nn.Linear(fc_input_dim, 256), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Sigmoid()
-        )
-
-    def forward(self, pA_id, pB_id, seqA, seqB, seqA_lens, seqB_lens, surface_cat, tourney_cat, match_feats):
-        # We handle batch vs single inference shapes here
-        embedA = self.player_embedding(pA_id).squeeze(1) if pA_id.dim() > 1 else self.player_embedding(pA_id)
-        embedB = self.player_embedding(pB_id).squeeze(1) if pB_id.dim() > 1 else self.player_embedding(pB_id)
-        
-        # Ensure seq has (batch, seq, feat)
-        outA, (hn_A, cn_A) = self.rnn(seqA)
-        seq_repA = hn_A[-1]
-        outB, (hn_B, cn_B) = self.rnn(seqB)
-        seq_repB = hn_B[-1]
-        
-        surf_emb = self.surface_embedding(surface_cat).squeeze(1) if surface_cat.dim() > 1 else self.surface_embedding(surface_cat)
-        tourn_emb = self.tourney_embedding(tourney_cat).squeeze(1) if tourney_cat.dim() > 1 else self.tourney_embedding(tourney_cat)
-        
-        x = torch.cat([seq_repA, seq_repB, embedA, embedB, surf_emb, tourn_emb, match_feats], dim=1)
-        return self.fc(x)
-
-class XGBoostPyTorchBlender:
-    def __init__(self):
-        self._lr = LogisticRegression()
-        self.is_fitted = False
-
-    def fit(self, xgb_probs, nn_probs, targets):
-        X = np.column_stack([xgb_probs, nn_probs])
-        self._lr.fit(X, targets)
-        self.is_fitted = True
-
-    def predict_proba(self, xgb_prob, nn_prob):
-        X = np.array([[xgb_prob, nn_prob]])
-        return float(self._lr.predict_proba(X)[0][1])
+from pytorch_model import TennisNet, XGBoostPyTorchBlender
 
 
 class HybridMLEngine:
@@ -99,26 +55,41 @@ class HybridMLEngine:
         except Exception as e:
             log.error(f"ID Map load failed: {e}")
 
+        # 2.5 Load NN Scaler
+        try:
+            self.nn_scaler = None
+            scaler_path = os.path.join(base_dir, 'nn_scaler.joblib')
+            if os.path.exists(scaler_path):
+                self.nn_scaler = joblib.load(scaler_path)
+                log.info("Loaded NN feature scaler.")
+        except Exception as e:
+            log.warning(f"NN Scaler load failed: {e}")
+
         # 3. Load Neural Network
         try:
             abs_nn = os.path.join(base_dir, self.nn_path)
             if os.path.exists(abs_nn):
-                num_players = 200000
-                if self.player_id_map:
-                    id_vals = [v for v in self.player_id_map.values() if isinstance(v, (int, float))]
-                    if id_vals:
-                        num_players = max(max(id_vals), num_players)
-
-                # Probe the saved checkpoint to derive match_feat_dim from the actual
-                # fc layer weight shape rather than hard-coding it.  The fc stack is:
-                #   fc.0.weight: (256, 200 + match_feat_dim)
-                # so match_feat_dim = fc.0.weight.shape[1] - 200
-                state = torch.load(abs_nn, map_location=torch.device('cpu'))
-                fc0_shape = state.get("fc.0.weight", state.get("fc.weight", None))
-                if fc0_shape is not None and fc0_shape.shape[1] > 200:
-                    inferred_feat_dim = fc0_shape.shape[1] - 200
+                state = torch.load(abs_nn, map_location=torch.device('cpu'), weights_only=True)
+                
+                # Infer num_players from the saved embedding layer rather than player_id_map
+                embed_weight = state.get("player_embedding.weight", None)
+                if embed_weight is not None:
+                    num_players = embed_weight.shape[0] - 1
                 else:
-                    inferred_feat_dim = 15  # safe default matching training
+                    num_players = 200000
+                    if self.player_id_map:
+                        id_vals = [v for v in self.player_id_map.values() if isinstance(v, (int, float))]
+                        if id_vals:
+                            num_players = max(max(id_vals), num_players)
+                # fc layer weight shape rather than hard-coding it.  The fc stack is:
+                #   fc.0.weight: (256, 280 + match_feat_dim)  (For Bidirectional LSTM with 8-dim embeds)
+                # so match_feat_dim = fc.0.weight.shape[1] - 280
+                state = torch.load(abs_nn, map_location=torch.device('cpu'), weights_only=True)
+                fc0_shape = state.get("fc.0.weight", state.get("fc.weight", None))
+                if fc0_shape is not None and fc0_shape.shape[1] > 280:
+                    inferred_feat_dim = fc0_shape.shape[1] - 280
+                else:
+                    inferred_feat_dim = 20  # safe default matching training
                 log.info(f"Neural Engine: inferred match_feat_dim={inferred_feat_dim} from checkpoint.")
 
                 self.nn_model = TennisNet(num_players=int(num_players), match_feat_dim=inferred_feat_dim)
@@ -145,6 +116,21 @@ class HybridMLEngine:
         if self.xgb_model:
             try:
                 surface = p1_stats.get('surface', 'Hard')
+
+                # BUG FIX: Use ranking_pts (ATP ranking points) consistently.
+                # 'elo' from tennisstats.com IS actually ATP ranking points (0–25,000),
+                # not a true Elo score. We now read ranking_pts first (explicitly set
+                # by main.py from the scraper), falling back to elo for compatibility.
+                # This ensures the training feature distribution matches inference.
+                def _rpts(stats, default=1000):
+                    v = stats.get('ranking_pts')
+                    if v is None:
+                        v = stats.get('elo', default)
+                    return float(v) if v is not None else float(default)
+
+                p1_rpts = _rpts(p1_stats)
+                p2_rpts = _rpts(p2_stats)
+
                 feat = {
                     # Surface one-hot
                     'Surface_Hard':  1 if surface == 'Hard'  else 0,
@@ -156,16 +142,16 @@ class HybridMLEngine:
                     'P1_Height_cm': p1_stats.get('height_cm', 185),
                     'P1_Age':       p1_stats.get('age', 25),
                     'P1_Rank':      p1_stats.get('ranking', 50),
-                    'P1_Rank_Points': p1_stats.get('elo', 1000),
+                    'P1_Rank_Points': p1_rpts,
                     # Player 2 base
                     'P2_Is_Right_Handed': 1 if p2_stats.get('hand', 'R') == 'R' else 0,
                     'P2_Height_cm': p2_stats.get('height_cm', 185),
                     'P2_Age':       p2_stats.get('age', 25),
                     'P2_Rank':      p2_stats.get('ranking', 50),
-                    'P2_Rank_Points': p2_stats.get('elo', 1000),
+                    'P2_Rank_Points': p2_rpts,
                     # Rank differential — single strongest XGBoost predictor for tennis
                     'Rank_Diff': p1_stats.get('ranking', 50) - p2_stats.get('ranking', 50),
-                    'Elo_Diff':  p1_stats.get('elo', 1000)  - p2_stats.get('elo', 1000),
+                    'Elo_Diff':  p1_rpts - p2_rpts,
                     # H2H win rate [0..1], defaults to 0.5 if unknown
                     'P1_H2H_Win_Rate': p1_stats.get('h2h_win_rate', 0.5),
                     # Surface-specific win rates [0..1]
@@ -180,6 +166,11 @@ class HybridMLEngine:
                     'P1_Break_Point_Conv':  p1_stats.get('break_point_conv', 0.40),
                     'P2_Break_Point_Conv':  p2_stats.get('break_point_conv', 0.40),
                 }
+                log.debug(
+                    "[XGB] Feature check — P1_Rank_Points=%.0f P2_Rank_Points=%.0f "
+                    "Elo_Diff=%.0f Surface=%s",
+                    p1_rpts, p2_rpts, p1_rpts - p2_rpts, surface,
+                )
                 ordered_features = {k: feat.get(k, 0) for k in self.feature_names}
                 df = pd.DataFrame([ordered_features])
                 res["xgb_prob"] = float(self.xgb_model.predict_proba(df)[0][1])
@@ -230,10 +221,27 @@ class HybridMLEngine:
                 surf_h  = 1.0 if p1_stats.get('surface') == 'Hard' else 0.0
                 surf_c  = 1.0 if p1_stats.get('surface') == 'Clay' else 0.0
                 surf_g  = 1.0 if p1_stats.get('surface') == 'Grass' else 0.0
+                
+                cpi = float(p1_stats.get('cpi', 35.0))
+                pA_fatigue = float(p1_stats.get('trailing_minutes', 180.0))
+                pB_fatigue = float(p2_stats.get('trailing_minutes', 180.0))
+                pA_arch = float(p1_stats.get('archetype', 0.5))
+                pB_arch = float(p2_stats.get('archetype', 0.5))
+                
                 # Build a feature vector; pad or truncate to match checkpoint's feat_dim
                 full_feats = [rank_diff, rank1, rank2, elo1, elo2, age1, age2, h1, h2,
-                              hand1, hand2, best_of, surf_h, surf_c, surf_g]
-                match_row = (full_feats + [0.0] * feat_dim)[:feat_dim]
+                              hand1, hand2, best_of, surf_h, surf_c, surf_g,
+                              cpi, pA_fatigue, pB_fatigue, pA_arch, pB_arch]
+                
+                if getattr(self, 'nn_scaler', None) is not None:
+                    try:
+                        scaled_feats = self.nn_scaler.transform([full_feats])[0].tolist()
+                    except Exception:
+                        scaled_feats = full_feats
+                else:
+                    scaled_feats = full_feats
+                    
+                match_row = (scaled_feats + [0.0] * feat_dim)[:feat_dim]
                 match_feats = [match_row]
                 t_feats = torch.tensor(match_feats, dtype=torch.float32)
                 

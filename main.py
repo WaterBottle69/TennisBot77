@@ -191,10 +191,44 @@ async def process_match(
         )
         return
 
-    p1_stats["surface"] = "Hard"
-    p1_stats["best_of"] = 3
-    p2_stats["surface"] = "Hard"
-    p2_stats["best_of"] = 3
+    # BUG FIX: Infer surface from tournament name BEFORE ML inference.
+    # Previously hardcoded to 'Hard', causing wrong XGBoost surface features
+    # for all Clay and Grass tournaments.
+    def _infer_surface(tournament_name: str) -> str:
+        """Infer court surface from tournament name. Defaults to Hard."""
+        t = (tournament_name or '').lower()
+        _clay_keywords = [
+            'roland garros', 'french open', 'clay', 'monte carlo', 'barcelona',
+            'madrid', 'rome', 'hamburg', 'bastad', 'gstaad', 'umag', 'kitzbuhel',
+            'buenos aires', 'estoril', 'marrakech', 'houston', 'sao paulo',
+        ]
+        _grass_keywords = [
+            'wimbledon', 'grass', "queen's", 'halle', 'eastbourne',
+            'hertogenbosch', "'s-hertogenbosch", 'nottingham', 'newport',
+            'birmingham', 'mallorca',
+        ]
+        if any(k in t for k in _clay_keywords):
+            return 'Clay'
+        if any(k in t for k in _grass_keywords):
+            return 'Grass'
+        return 'Hard'
+
+    # Use the tournament from initial pregame matchup or a placeholder;
+    # it will be refined when the first live score tick arrives.
+    _initial_tournament = p1_stats.get('tournament', '') or p2_stats.get('tournament', '')
+    _resolved_surface   = _infer_surface(_initial_tournament)
+    p1_stats["surface"]     = _resolved_surface
+    p1_stats["best_of"]     = 3
+    p2_stats["surface"]     = _resolved_surface
+    p2_stats["best_of"]     = 3
+    # Expose ranking_pts explicitly so ml_engine reads the correct key
+    # (the 'elo' field from tennisstats.com actually contains ATP ranking points).
+    p1_stats["ranking_pts"] = p1_stats.get("elo", 1000)
+    p2_stats["ranking_pts"] = p2_stats.get("elo", 1000)
+    log.info(
+        "[SURFACE] %s vs %s: surface=%s (from tournament='%s')",
+        player_a, player_b, _resolved_surface, _initial_tournament,
+    )
 
     # Fetch recent match sequences for the Neural LSTM Engine
     seq_a = await history._scraper.fetch_recent_matches(p1_stats.get("slug", ""), n=10)
@@ -269,6 +303,7 @@ async def process_match(
     # Live hold-rate tracking for dynamic Markov parameter updates
     _serve_pts_won   = 0
     _serve_pts_total = 0
+    _serve_games_completed = 0  # BUG FIX: game counter for logging (replaces per-game reset)
     _prev_pts        = (0, 0)   # previous tick's game-point tuple for delta detection
     _atp_tick        = 0    # counts live ticks; triggers ATP stat refresh every 30
     _live_hold_rate  = 0.5  # empirical server hold rate from ATP stats (default 50%)
@@ -473,11 +508,18 @@ async def process_match(
                     pts = score_update.get("points", (0, 0))
                     p1_serving = score_update.get("p1_serving")
 
-                    # Game reset: new game started — reset per-game counters so early
-                    # data doesn't permanently dominate the posterior.
+                    # BUG FIX: Accumulate serve stats across the ENTIRE match, not per game.
+                    # Previously reset every time pts==(0,0), which meant the Bayesian
+                    # updater (threshold=10 points) almost never fired (a game has 4-7 pts).
+                    # Now we only increment a game counter for context logging.
                     if pts == (0, 0) and _prev_pts != (0, 0):
-                        _serve_pts_won = 0
-                        _serve_pts_total = 0
+                        _serve_games_completed += 1
+                        log.debug(
+                            "[BAYESIAN] Game %d complete — cumulative serve pts: %d/%d",
+                            _serve_games_completed, _serve_pts_won, _serve_pts_total,
+                        )
+                        # DO NOT reset _serve_pts_won/_serve_pts_total here —
+                        # accumulate across the whole match for a meaningful posterior.
 
                     if p1_serving is not None and pts != _prev_pts:
                         p1_delta = pts[0] - _prev_pts[0]
@@ -537,28 +579,21 @@ async def process_match(
 
                     win_prob_a = lms.win_probability()
 
-                    # ── Sun glare: adjust win_prob for server facing the sun ──────────
-                    # Backtest (9,860 ATP matches 2019-2024) shows -0.72% serve-win% on
-                    # hard courts (p=0.009, d=-0.12). No significant effect on clay/grass.
-                    # Only applied on hard courts; skipped for clay/grass/unknown surfaces.
+                    # [SUN GLARE DISABLED — net negative edge]
+                    # WFO backtest (9,860 ATP matches 2018-2024) shows bet_roi = -23.5%
+                    # across 20/20 folds with p=0.90 (no statistical significance).
+                    # The penalty was adjusting win_prob by up to ±4%, hurting expected
+                    # value on every bet it fired on.  Kept for dashboard display only.
                     _hard_court = _venue is not None and _venue.court_surface == "hard"
                     if _sun_data is not None and _sun_data.glare_active and _hard_court:
                         _p1_srv = score_update.get("p1_serving", True)
                         _penalty = _sun_data.p1_sun_penalty if _p1_srv else _sun_data.p2_sun_penalty
                         if _penalty > 0.001:
-                            # Markov sensitivity ≈ 2×: p_serve Δ0.01 → win_prob Δ0.02
-                            _wp_delta = min(0.04, _penalty * 2.0)
-                            # Serving player's win prob drops; opponent's rises
-                            if _p1_srv:
-                                win_prob_a = max(0.01, win_prob_a - _wp_delta)
-                            else:
-                                win_prob_a = min(0.99, win_prob_a + _wp_delta)
-                            log.info(
-                                "[SUN] ☀ Glare: %s serving into sun — p_serve penalty=%.1f%% "
-                                "win_prob %.3f→%.3f | %s",
+                            log.debug(
+                                "[SUN] ☀ Glare detected (DISABLED): %s penalty=%.1f%% | %s"
+                                " — win_prob unchanged (feature removed, see WFO results).",
                                 player_a if _p1_srv else player_b,
-                                _penalty * 100, win_prob_a + (_wp_delta if _p1_srv else -_wp_delta),
-                                win_prob_a, _sun_data.description,
+                                _penalty * 100, _sun_data.description,
                             )
 
                     status_str = f"L: {score_update['points'][0]}-{score_update['points'][1]}"
@@ -887,6 +922,11 @@ async def run_game_session():
     location_engine = LocationEngine()
     log.info("[ADAPTIVE] Controller started. Base MIN_EDGE=%.4f", adaptive.base_min_edge)
 
+    # BUG FIX: Reconcile open positions from Kalshi portfolio at startup.
+    # Without this, a server restart loses all position state and the bot may
+    # re-enter trades it already holds or fail to exit positions it thinks are closed.
+    await bets.reconcile_positions_from_kalshi()
+
     # Shared state for deduplication across discovery cycles
     active_tickers: set = set()
     seq_counter: list   = [0]   # mutable int so the nested coroutine can increment it
@@ -930,10 +970,37 @@ async def run_game_session():
         for w in workers:
             w.cancel()
 
+    except asyncio.CancelledError:
+        log.info("Session cancelled via system signal. Shutting down gracefully...")
     finally:
+        log.info("Closing all external connections and saving state...")
         await kalshi.close()
         await history.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(run_game_session())
+    import signal
+    
+    # Python 3.10+ requires explicit loop creation if one isn't running
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    main_task = loop.create_task(run_game_session())
+    
+    def handle_shutdown():
+        log.info("Received shutdown signal. Initiating graceful shutdown...")
+        main_task.cancel()
+        
+    try:
+        loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
+        loop.add_signal_handler(signal.SIGINT, handle_shutdown)
+    except NotImplementedError:
+        # Windows compatibility
+        pass
+        
+    try:
+        loop.run_until_complete(main_task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        log.info("Bot successfully terminated with persistence intact.")

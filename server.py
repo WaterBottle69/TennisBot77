@@ -219,7 +219,7 @@ async def start_bot():
 
 @app.post("/api/stop_bot")
 async def stop_bot():
-    """Kill any running bot subprocess and clear match state."""
+    """Kill any running bot subprocess."""
     import signal
     import subprocess
     try:
@@ -229,13 +229,6 @@ async def stop_bot():
         )
     except Exception:
         pass
-    for fname in ["kalshi_match_state.json", "live_state.json"]:
-        path = os.path.join(BASE_DIR, fname)
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
     log.info("Bot stopped via dashboard.")
     return {"status": "stopped"}
 

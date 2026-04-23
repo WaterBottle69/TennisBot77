@@ -7,6 +7,7 @@ Manages buy/sell decisions based on Elo-derived win probability vs market price.
 
 import asyncio
 import logging
+import re
 import time
 from kalshi_client import KalshiClient
 from config import Config
@@ -165,6 +166,62 @@ class BetManager:
         self.surface_model = None
         self._buy_lock = asyncio.Lock()
 
+    async def reconcile_positions_from_kalshi(self) -> None:
+        """
+        Seed _open_positions from the real Kalshi portfolio at startup.
+
+        Prevents duplicate entries and missed exits after server restarts.
+        In DRY_RUN mode (no private key) this is a no-op — positions are
+        simulated in memory only.
+        """
+        if not self.kalshi.private_key:
+            log.info(
+                "[RECONCILE] DRY_RUN mode — skipping Kalshi position sync "
+                "(no real positions to reconcile)."
+            )
+            return
+        try:
+            resp = await self.kalshi._request("GET", "/portfolio/positions")
+            positions = resp.get("market_positions") or resp.get("positions") or []
+            loaded = 0
+            for pos in positions:
+                ticker = pos.get("market_ticker") or pos.get("ticker")
+                # Kalshi returns net signed position: positive = YES contracts held
+                yes_count = int(pos.get("position", 0))
+                no_count  = int(pos.get("position_no", 0))
+                for side, count in (("yes", yes_count), ("no", no_count)):
+                    if count <= 0:
+                        continue
+                    pos_key = f"{ticker}_{side}"
+                    if pos_key not in self._open_positions:
+                        # Reconstruct a minimal position record so exit logic works
+                        self._open_positions[pos_key] = {
+                            "ticker":        ticker,
+                            "side":          side,
+                            "count":         count,
+                            "cost_usdc":     float(pos.get("total_cost", 0)) / 100.0,
+                            "entry_price":   0.0,   # unknown; exit logic will use market price
+                            "reconciled":    True,   # flag: loaded from API, not from this session
+                            "player_a":      "",
+                            "player_b":      "",
+                        }
+                        log.info(
+                            "[RECONCILE] Loaded position: %s %s x%d (from Kalshi portfolio)",
+                            ticker, side.upper(), count,
+                        )
+                        loaded += 1
+            log.info(
+                "[RECONCILE] Done — %d pre-existing position(s) loaded into tracking.",
+                loaded,
+            )
+        except Exception as e:
+            log.warning(
+                "[RECONCILE] Could not load Kalshi positions: %s — "
+                "starting with empty position state. "
+                "Existing positions (if any) will NOT be double-counted on first entry check.",
+                e,
+            )
+
 
     # ──────────────────────────────────────────────────────────────────────────
     # Main decision loop
@@ -217,25 +274,64 @@ class BetManager:
         p_a = win_prob["team_a"]   # probability team A (home/YES) wins
         p_b = win_prob["team_b"]
 
-        # YES Mapping: determine whether YES contract = player_a by fuzzy-matching
-        # player_a's last name against the market title (before 'vs').
+        # YES/NO Side Resolution (Bug Fix: was single last-name token match, which silently
+        # flipped bets whenever Kalshi and LiveScore list players in a different order).
+        #
+        # New logic: multi-token match on all non-trivial parts of player_a's name.
+        # - Match left side  of '<name> vs <name>' → player_a IS YES
+        # - Match right side of '<name> vs <name>' → player_a IS NO
+        # - Both sides match, or neither matches → AMBIGUOUS: skip the bet entirely.
+        #   It is far better to miss a bet than to bet on the wrong player.
         player_a_name = market.get("player_a", "")
         market_title  = market.get("question", "") or (market.get("_raw") or {}).get("title", "")
-        yes_is_player_a = True  # conservative default
+        yes_is_player_a: bool | None = None  # None = ambiguous → will abstain
         if player_a_name and market_title:
-            parts = player_a_name.lower().split()
-            a_last = parts[-1] if parts else player_a_name.lower()
+            pa_lower = player_a_name.lower()
             title_lower = market_title.lower()
+            # Extract all meaningful name tokens (>2 chars, alpha only)
+            pa_tokens = [
+                t for t in re.sub(r"[^a-z ]", "", pa_lower).split()
+                if len(t) > 2
+            ]
             vs_pos = title_lower.find(" vs")
-            if vs_pos > 0:
-                yes_is_player_a = a_last in title_lower[:vs_pos]
+            if vs_pos > 0 and pa_tokens:
+                left_side  = title_lower[:vs_pos]
+                right_side = title_lower[vs_pos + 4:]  # skip " vs "
+                left_match  = any(tok in left_side  for tok in pa_tokens)
+                right_match = any(tok in right_side for tok in pa_tokens)
+
+                if left_match and not right_match:
+                    yes_is_player_a = True
+                    log.info(
+                        "[YES/NO] Resolved: %s = YES (left side of '%s')",
+                        player_a_name, market_title,
+                    )
+                elif right_match and not left_match:
+                    yes_is_player_a = False
+                    log.info(
+                        "[YES/NO] Resolved: %s = NO (right side of '%s')",
+                        player_a_name, market_title,
+                    )
+                else:
+                    log.warning(
+                        "[YES/NO] AMBIGUOUS mapping for '%s' in title '%s' "
+                        "(left_match=%s right_match=%s) — SKIPPING BET to avoid side flip.",
+                        player_a_name, market_title, left_match, right_match,
+                    )
+                    return  # Safe abstain: never bet on an ambiguous side
             else:
-                yes_is_player_a = a_last in title_lower
-            log.info(
-                "YES mapping verified: %s (a=%s title=%s)",
-                "PLAYER_A IS YES" if yes_is_player_a else "PLAYER_B IS YES",
-                player_a_name, market_title,
+                # No 'vs' separator or no tokens — can't determine side safely
+                log.warning(
+                    "[YES/NO] Cannot parse 'vs' in title '%s' for player '%s' — SKIPPING BET.",
+                    market_title, player_a_name,
+                )
+                return
+        else:
+            log.warning(
+                "[YES/NO] Missing player_a or market title — SKIPPING BET."
             )
+            return
+
         if not yes_is_player_a:
             p_a, p_b = p_b, p_a   # swap so p_a always = probability that YES wins
 
@@ -275,10 +371,22 @@ class BetManager:
         await self._check_exits(market, win_prob, market_monitor=market_monitor)
 
         # --- Entry logic ---
-        # Enforce No Pregame Rule: Block entry logic unless the match is reporting live score status.
+        if available_balance is None:
+            available_balance = await self.kalshi.get_balance()
+            
+        # Allow pregame limit orders (Market Maker mode)
         if not is_live_match:
-            log.info("  Pregame status detected — blocking entries until match goes live.")
-            return
+            log.info("  [PREGAME] Market is pre-game. Spooling pre-match limit orders based on baseline ML.")
+        else:
+            # Live Match: Activate Predictive Sniper limit orders
+            if game_state and hasattr(self, 'place_predictive_limit_order'):
+                if hasattr(self, 'cancel_stale_limits'):
+                    await self.cancel_stale_limits(yes_price)
+                await self.place_predictive_limit_order(
+                    market, game_state, available_balance=available_balance, 
+                    kelly_mult=(adaptive.kelly_multiplier if adaptive else 1.0), 
+                    adaptive=adaptive
+                )
 
         # Adaptive MIN_EDGE: compute per-side thresholds so a longshot YES price
         # (< 10c → 15% floor) does not incorrectly block the NO side, which as the
@@ -349,8 +457,6 @@ class BetManager:
             log.info("[CONVERGENCE] REDUCE ×0.25: pts_edge=%.4f srv_div=%+.4f (model-market diverge)", _pts_edge, _srv_div)
         kelly_mult = min(kelly_mult * kelly_mult_conv, 2.0)
 
-        if available_balance is None:
-            available_balance = await self.kalshi.get_balance()
         if adaptive:
             adaptive.update_bankroll(available_balance)
 

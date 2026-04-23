@@ -6,6 +6,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -16,10 +17,42 @@ import glob
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger(__name__)
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss to focus training on hard examples (upsets) rather than
+    easy favorites. Helps prevent the model from getting lazy on heavily
+    imbalanced match-ups.
+    """
+    def __init__(self, gamma=2.0, alpha=0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, inputs, targets):
+        # inputs are probabilities (since our model ends with Sigmoid)
+        probs = inputs.clamp(min=1e-7, max=1.0 - 1e-7)
+        targets = targets.float()
+        
+        p_t = probs * targets + (1.0 - probs) * (1.0 - targets)
+        alpha_t = self.alpha * targets + (1.0 - self.alpha) * (1.0 - targets)
+        loss = -alpha_t * (1.0 - p_t) ** self.gamma * torch.log(p_t)
+        
+        return loss.mean()
+
 # --- ARCHITECTURE ---
 
 class TennisNet(nn.Module):
-    def __init__(self, num_players, embed_dim=32, seq_input_dim=4, rnn_hidden_dim=64, match_feat_dim=15, num_surfaces=3, num_tournaments=4):
+    def __init__(self, num_players, embed_dim=8, seq_input_dim=4, rnn_hidden_dim=64, match_feat_dim=27, num_surfaces=3, num_tournaments=4):
+        """
+        Args:
+            embed_dim: Player embedding dimension.
+                       Reduced from 32 → 8 to prevent overfitting.
+                       Most ATP players appear <10 times in training data;
+                       a 32-dim embedding has 3+ params per training example,
+                       which memorises noise rather than learning player style.
+                       8-dim gives the model expressive power for common players
+                       while limiting capacity for rare ones.
+        """
         super(TennisNet, self).__init__()
         
         # 1. Player Embeddings
@@ -32,8 +65,9 @@ class TennisNet(nn.Module):
             input_size=seq_input_dim, 
             hidden_size=rnn_hidden_dim, 
             batch_first=True, 
-            dropout=0.2, 
-            num_layers=1
+            dropout=0.0,  # dropout has no effect with num_layers=1; kept for API compat
+            num_layers=1,
+            bidirectional=True
         )
         
         # 3. Categorical Embeddings for match level
@@ -41,9 +75,8 @@ class TennisNet(nn.Module):
         self.tourney_embedding = nn.Embedding(num_tournaments + 1, 4, padding_idx=0)
         
         # 4. Feature Combination & Fully Connected Layers
-        # Concat size: Seq_A (64) + Seq_B (64) + Embed_A (32) + Embed_B (32) + Cat_Emb (8) + Match_Feats (match_feat_dim) + Diff_Feats
-        # Total approx: 64+64+32+32+8+match_feat_dim
-        fc_input_dim = 200 + match_feat_dim
+        # Concat: seq_A(128) + seq_B(128) + embed_A(embed_dim) + embed_B(embed_dim) + surf(4) + tourn(4)
+        fc_input_dim = (rnn_hidden_dim * 2) * 2 + embed_dim + embed_dim + 8 + match_feat_dim
         
         self.fc = nn.Sequential(
             nn.Linear(fc_input_dim, 256),
@@ -58,6 +91,32 @@ class TennisNet(nn.Module):
             nn.Sigmoid()
         )
 
+    def _encode_seq(self, seq, lengths):
+        """
+        Encode a padded sequence using LSTM with proper masking.
+
+        Uses pack_padded_sequence so the LSTM ignores zero-padding for
+        players with fewer than `seq_len` historical matches.  Previously the
+        LSTM read zeros as real data and learned a spurious 'zero-history'
+        artifact that degraded predictions for new or rare players.
+
+        Args:
+            seq:     (batch, seq_len, input_dim) padded tensor
+            lengths: (batch,) actual sequence lengths (≥1)
+
+        Returns:
+            (batch, rnn_hidden_dim) last valid hidden state
+        """
+        # Clamp lengths to [1, seq_len] — DataLoader may produce 0-length
+        lengths_cpu = lengths.clamp(min=1).cpu()
+        packed = pack_padded_sequence(
+            seq, lengths_cpu, batch_first=True, enforce_sorted=False
+        )
+        _, (hn, _) = self.rnn(packed)
+        # hn shape: (2, batch, hidden_dim) since num_layers=1, bidirectional=True
+        # We concatenate the forward and backward hidden states
+        return torch.cat([hn[0], hn[1]], dim=1)  # (batch, hidden_dim * 2)
+
     def forward(self, pA_id, pB_id, seqA, seqB, seqA_lens, seqB_lens, surface_cat, tourney_cat, match_feats):
         """
         seqA, seqB shape: (batch_size, seq_len, seq_input_dim)
@@ -66,15 +125,9 @@ class TennisNet(nn.Module):
         embedA = self.player_embedding(pA_id)
         embedB = self.player_embedding(pB_id)
         
-        # Process LSTM for A
-        # Using basic lstm approach (we could use pack_padded_sequence for true masking)
-        outA, (hn_A, cn_A) = self.rnn(seqA)
-        # Extract the last valid hidden state based on lengths (simplification: just take hn_A[-1])
-        seq_repA = hn_A[-1] # shape: (batch_size, rnn_hidden_dim)
-        
-        # Process LSTM for B
-        outB, (hn_B, cn_B) = self.rnn(seqB)
-        seq_repB = hn_B[-1]
+        # Encode sequences with proper padding masks (BUG FIX: was just hn_A[-1] which reads zeros)
+        seq_repA = self._encode_seq(seqA, seqA_lens)
+        seq_repB = self._encode_seq(seqB, seqB_lens)
         
         # Match Categories
         surf_emb = self.surface_embedding(surface_cat).squeeze(1)
@@ -153,7 +206,7 @@ class XGBoostPyTorchBlender:
 def train_neural_network(model, train_loader, val_loader, epochs=20, lr=1e-3, device='cpu'):
     log.info(f"Starting neural network training on {device}...")
     model.to(device)
-    criterion = nn.BCELoss()
+    criterion = FocalLoss(gamma=2.0, alpha=0.25)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     
     best_val_loss = float('inf')

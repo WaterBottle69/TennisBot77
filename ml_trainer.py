@@ -119,18 +119,27 @@ def main():
     # Let's perform walk-forward GridSearch. TimeSeriesSplit prevents future data leakage.
     model = GradientBoostingClassifier(random_state=42)
 
-    # We can use slightly wider hyperparameter search since features are limited
+    # Regularization params added to prevent overfitting on the rank-dominated feature set.
+    # subsample < 1.0: stochastic gradient boosting (reduces variance, avoids memorising outliers).
+    # max_features='sqrt': random feature subsampling per split (like Random Forest), breaks
+    # P1_Rank / P2_Rank co-dominance and forces the model to explore weaker signals.
     param_grid = {
         'max_depth': [3, 5, 7],
         'learning_rate': [0.05, 0.1],
-        'n_estimators': [50, 100, 150]
+        'n_estimators': [50, 100, 150],
+        'subsample': [0.8],          # stochastic boosting — reduces variance
+        'max_features': ['sqrt'],    # random feature selection per split
     }
 
     log.info("Starting Walk-Forward Hyperparameter optimization (GridSearchCV with TimeSeriesSplit)...")
     grid_search = GridSearchCV(
         estimator=model,
         param_grid=param_grid,
-        scoring='accuracy',
+        # BUG FIX: was 'accuracy'. For a probability-outputting model, 'neg_log_loss'
+        # is the correct scoring metric — it penalises overconfident wrong predictions
+        # and rewards well-calibrated probabilities. 'accuracy' treats all errors equally
+        # and doesn't distinguish between p=0.51 and p=0.99 wrong predictions.
+        scoring='neg_log_loss',
         cv=tscv,
         verbose=1,
         n_jobs=-1

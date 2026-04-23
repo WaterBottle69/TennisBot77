@@ -156,8 +156,9 @@ class TestMatchWinProb(unittest.TestCase):
 def _stub_ml_deps():
     """Insert MagicMock stubs for optional ML heavy-weight dependencies."""
     heavy = [
-        "joblib", "torch", "torch.nn", "torch.nn.functional",
-        "sklearn", "sklearn.linear_model",
+        "joblib", "torch", "torch.nn", "torch.nn.functional", "torch.optim",
+        "torch.nn.utils", "torch.nn.utils.rnn", "torch.utils", "torch.utils.data",
+        "sklearn", "sklearn.linear_model", "sklearn.preprocessing", "sklearn.metrics", "sklearn.ensemble",
         "pandas",
     ]
     for mod in heavy:

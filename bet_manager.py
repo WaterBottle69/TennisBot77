@@ -257,6 +257,22 @@ class BetManager:
         if not market.get("active", True):
             log.info("Market inactive — skipping.")
             return
+            
+        injury_flag = event.get("injury_flag", False)
+        if injury_flag:
+            log.warning(f"🚨 MEDICAL TIMEOUT / INJURY FLAG DETECTED for {market.get('id')}. Halting Limit Orders.")
+            # Cancel all pending limits for this ticker
+            for pos_key, pending in list(self._pending_limits.items()):
+                if pending["ticker"] == market["id"]:
+                    order_id = pending.get("order_id")
+                    if order_id:
+                        try:
+                            await self.kalshi.cancel_order(order_id)
+                        except Exception as e:
+                            log.error(f"Failed to cancel MTO order {order_id}: {e}")
+                    del self._pending_limits[pos_key]
+            # Do not return here completely, allow the 'sell' logic to run so we dump positions, 
+            # but we will block the 'buy' logic below.
 
         # Evict stale cooldown entries (older than 2 h) to prevent unbounded growth
         _now_mono = time.monotonic()
@@ -420,6 +436,12 @@ class BetManager:
 
         should_yes, reason_yes = should_bet_meta(p_a, yes_price, edge_yes, flow_yes, effective_min_edge_yes)
         should_no, reason_no   = should_bet_meta(p_b, no_price,  edge_no,  flow_no,  effective_min_edge_no)
+
+        if injury_flag:
+            should_yes = False
+            should_no = False
+            reason_yes = "[MTO] Injury flag active"
+            reason_no = "[MTO] Injury flag active"
 
         # ── Mean-reversion Z-score override (Phase 3 — information.md) ──────────
         # If normal edge didn't fire but MarketMonitor detects a statistically

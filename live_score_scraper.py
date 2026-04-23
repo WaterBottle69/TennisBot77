@@ -163,6 +163,10 @@ class LiveScoreScraper:
                     if p in ["a", "ad", "40a", "adv"]: return 4
                     return 0
 
+                # MTO NLP Override: Scan raw event for medical timeout
+                event_raw_str = str(event).lower()
+                injury_flag = "medical timeout" in event_raw_str
+
                 active_matches.append({
                     "tournament": tournament,
                     "player_a": p1_name,
@@ -172,7 +176,8 @@ class LiveScoreScraper:
                     "points": (map_point(points_a_raw), map_point(points_b_raw)),
                     "p1_serving": server == "1",
                     "raw_points": (points_a_raw, points_b_raw),
-                    "status": status
+                    "status": status,
+                    "injury_flag": injury_flag
                 })
         
         return active_matches
@@ -217,6 +222,7 @@ class LiveScoreScraper:
                 match_rev["games"] = (m["games"][1], m["games"][0])
                 match_rev["points"] = (m["points"][1], m["points"][0])
                 match_rev["p1_serving"] = not m["p1_serving"]
+                match_rev["injury_flag"] = m.get("injury_flag", False)
                 return match_rev
         return None
 
@@ -333,6 +339,7 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
                     "status":        match.get("status", "LIVE"),
                     "source":        match.get("_source", "livescore"),
                     "data_age_secs": 0.0,
+                    "injury_flag":   match.get("injury_flag", False),
                 }
                 await asyncio.sleep(interval)
                 continue

@@ -228,10 +228,22 @@ class HybridMLEngine:
                 pA_arch = float(p1_stats.get('archetype', 0.5))
                 pB_arch = float(p2_stats.get('archetype', 0.5))
                 
+                # New Niche Features (Defaults if live scraping hasn't populated them yet)
+                pA_clutch = float(p1_stats.get('clutch_factor', 0.5))
+                pB_clutch = float(p2_stats.get('clutch_factor', 0.5))
+                pA_lefty_winrate = float(p1_stats.get('lefty_winrate', 0.5))
+                pB_lefty_winrate = float(p2_stats.get('lefty_winrate', 0.5))
+                pA_serve_var = float(p1_stats.get('serve_var', 0.0))
+                pB_serve_var = float(p2_stats.get('serve_var', 0.0))
+                altitude = float(p1_stats.get('altitude', 0.0))
+                air_density = float(p1_stats.get('air_density', 1.0))
+                
                 # Build a feature vector; pad or truncate to match checkpoint's feat_dim
                 full_feats = [rank_diff, rank1, rank2, elo1, elo2, age1, age2, h1, h2,
                               hand1, hand2, best_of, surf_h, surf_c, surf_g,
-                              cpi, pA_fatigue, pB_fatigue, pA_arch, pB_arch]
+                              cpi, pA_fatigue, pB_fatigue, pA_arch, pB_arch,
+                              pA_clutch, pB_clutch, pA_lefty_winrate, pB_lefty_winrate,
+                              pA_serve_var, pB_serve_var, altitude, air_density]
                 
                 if getattr(self, 'nn_scaler', None) is not None:
                     try:

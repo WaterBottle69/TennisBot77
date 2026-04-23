@@ -81,6 +81,10 @@ def conditional_serve_prob(
 
     if leverage > LEVERAGE_TAU:
         p -= BETA_PRESSURE
+        
+        # FATIGUE SPIKE OVERRIDE: Extreme anaerobic lactic accumulation during extended Deuce
+        if leverage >= 0.9:
+            p -= 0.035
 
     if is_tiebreak:
         # Pull toward 0.5 — tiebreaks attenuate the serve advantage.

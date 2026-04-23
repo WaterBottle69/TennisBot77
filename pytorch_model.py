@@ -42,7 +42,7 @@ class FocalLoss(nn.Module):
 # --- ARCHITECTURE ---
 
 class TennisNet(nn.Module):
-    def __init__(self, num_players, embed_dim=8, seq_input_dim=4, rnn_hidden_dim=64, match_feat_dim=27, num_surfaces=3, num_tournaments=4):
+    def __init__(self, num_players, embed_dim=8, seq_input_dim=4, rnn_hidden_dim=64, match_feat_dim=28, num_surfaces=3, num_tournaments=4):
         """
         Args:
             embed_dim: Player embedding dimension.

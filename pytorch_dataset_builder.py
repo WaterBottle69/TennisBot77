@@ -36,7 +36,36 @@ def build_sequential_dataset(data_dir, sequence_length=10):
         'gstaad': 1050.0,
         'kitzbuhel': 762.0,
         'madrid': 667.0,
-        'quito': 2850.0
+        'quito': 2850.0,
+        'indian wells': 35.0,
+        'miami': 2.0,
+        'monte carlo': 50.0,
+        'rome': 20.0,
+        'roland garros': 35.0,
+        'wimbledon': 30.0,
+        'us open': 5.0,
+        'cincinnati': 147.0,
+        'paris': 35.0,
+        'shanghai': 4.0,
+        'australian open': 5.0
+    }
+    
+    # Historical Average Weather Map: 'tourney_name': (Temp C, Humidity %)
+    weather_map = {
+        'australian open': (26.0, 50.0),
+        'indian wells': (25.0, 20.0),
+        'miami': (24.0, 65.0),
+        'monte carlo': (15.0, 70.0),
+        'madrid': (20.0, 45.0),
+        'rome': (21.0, 60.0),
+        'roland garros': (20.0, 65.0),
+        'wimbledon': (21.0, 60.0),
+        'us open': (26.0, 60.0),
+        'cincinnati': (25.0, 65.0),
+        'paris': (12.0, 80.0),
+        'shanghai': (22.0, 65.0),
+        'bogota': (18.0, 75.0),
+        'gstaad': (20.0, 50.0),
     }
     
     # CPI Hardcoded Mapping
@@ -120,13 +149,27 @@ def build_sequential_dataset(data_dir, sequence_length=10):
         w_arch = get_historical_archetype(wid_raw)
         l_arch = get_historical_archetype(lid_raw)
         
-        # Calculate Altitude
+        # Calculate Altitude & Weather Physics
         tname = str(row.get('tourney_name', '')).lower()
         altitude = 0.0
+        temp_c = 22.0     # Default neutral temp
+        humidity = 50.0   # Default neutral humidity
+        
         for k, v in altitude_map.items():
             if k in tname:
                 altitude = v
                 break
+                
+        for k, v in weather_map.items():
+            if k in tname:
+                temp_c, humidity = v
+                break
+                
+        # Air Density Calculation (approximation multiplier)
+        # Drops with altitude, drops with heat, drops slightly with humidity
+        # Base density at 0m, 15C, 0% hum = ~1.225 kg/m^3. We normalize to 1.0.
+        air_density = (1.0 - (altitude / 10400.0)) * (288.15 / (273.15 + temp_c)) * (1.0 - (humidity * 0.0005))
+        
         
         # Calculate Clutch Factor
         def get_clutch(pid):
@@ -247,7 +290,8 @@ def build_sequential_dataset(data_dir, sequence_length=10):
             pA_clutch, pB_clutch,
             pA_lefty_winrate, pB_lefty_winrate,
             pA_serve_var, pB_serve_var,
-            altitude
+            altitude,
+            air_density
         ])
         
         # Update Timeline (Push this match to both players' history queues for FUTURE predictions)

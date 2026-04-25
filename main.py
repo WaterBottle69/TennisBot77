@@ -44,16 +44,22 @@ _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(module)s: %(message)s")
 
 def _setup_logging():
     root = logging.getLogger()
-    if root.handlers:
-        return  # Already configured (e.g. when imported by server.py)
     root.setLevel(logging.INFO)
 
-    # Rotating file handler: 50 MB per file, keep 10 backups (~500 MB max)
-    fh = logging.handlers.RotatingFileHandler(
-        BOT_LOG_PATH, mode="a", maxBytes=50 * 1024 * 1024, backupCount=10, encoding="utf-8"
-    )
-    fh.setFormatter(_fmt)
-    root.addHandler(fh)
+    # Ensure the rotating file handler exists (only add once; check by type).
+    if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in root.handlers):
+        fh = logging.handlers.RotatingFileHandler(
+            BOT_LOG_PATH, mode="a", maxBytes=50 * 1024 * 1024, backupCount=10, encoding="utf-8"
+        )
+        fh.setFormatter(_fmt)
+        root.addHandler(fh)
+
+    # Always ensure a console handler so messages appear in the terminal.
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+               for h in root.handlers):
+        sh = logging.StreamHandler()
+        sh.setFormatter(_fmt)
+        root.addHandler(sh)
 
 _setup_logging()
 log = logging.getLogger(__name__)
@@ -1093,27 +1099,47 @@ async def run_game_session():
 
 if __name__ == "__main__":
     import signal
-    
-    # Python 3.10+ requires explicit loop creation if one isn't running
+    import uvicorn
+
+    async def _run_all():
+        """Run the trading bot and the web dashboard server concurrently."""
+        # Import the FastAPI app lazily so server.py's module-level code
+        # (which calls _setup_logging) only runs inside the event loop.
+        from server import app as _fastapi_app
+
+        uv_config = uvicorn.Config(
+            _fastapi_app,
+            host="0.0.0.0",
+            port=8000,
+            log_level="warning",   # keep uvicorn quiet; bot uses its own logger
+            access_log=False,
+        )
+        uv_server = uvicorn.Server(uv_config)
+
+        # Run the web server and the bot engine as concurrent tasks.
+        bot_task = asyncio.create_task(run_game_session())
+        srv_task = asyncio.create_task(uv_server.serve())
+
+        def _handle_shutdown(_signum=None, _frame=None):
+            log.info("Received shutdown signal. Initiating graceful shutdown...")
+            bot_task.cancel()
+            uv_server.should_exit = True
+
+        loop = asyncio.get_running_loop()
+        try:
+            loop.add_signal_handler(signal.SIGTERM, _handle_shutdown)
+            loop.add_signal_handler(signal.SIGINT,  _handle_shutdown)
+        except (NotImplementedError, OSError):
+            pass  # Windows / unsupported platform
+
+        try:
+            await asyncio.gather(bot_task, srv_task, return_exceptions=True)
+        finally:
+            log.info("Bot successfully terminated with persistence intact.")
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    main_task = loop.create_task(run_game_session())
-    
-    def handle_shutdown():
-        log.info("Received shutdown signal. Initiating graceful shutdown...")
-        main_task.cancel()
-        
     try:
-        loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
-        loop.add_signal_handler(signal.SIGINT, handle_shutdown)
-    except NotImplementedError:
-        # Windows compatibility
+        loop.run_until_complete(_run_all())
+    except KeyboardInterrupt:
         pass
-        
-    try:
-        loop.run_until_complete(main_task)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        log.info("Bot successfully terminated with persistence intact.")

@@ -418,115 +418,146 @@ class KalshiClient:
                     await asyncio.sleep(2 ** attempt)
         except Exception as e:
             raise
+    # Known Kalshi series tickers that contain live H2H tennis matchups.
+    # Querying these directly bypasses the need to paginate thousands of events.
+    _TENNIS_SERIES = (
+        "KXATPMATCH",
+        "KXWTAMATCH",
+        "KXITFMATCH",
+        "KXITFWMATCH",
+        "KXATPCHALLENGERMATCH",
+        "KXWTACHALLENGERMATCH",
+        "KXATPSETWINNER",
+    )
+
+    async def _fetch_series_events(self, series_ticker: str) -> List[Dict]:
+        """Fetch all open events for a single known tennis series ticker."""
+        events: List[Dict] = []
+        cursor = ""
+        for _ in range(10):
+            q = f"status=open&limit=200&with_nested_markets=true&series_ticker={quote(series_ticker, safe='')}"
+            if cursor:
+                q += f"&cursor={quote(cursor, safe='')}"
+            try:
+                resp = await self._request("GET", f"/events?{q}", use_discovery=True)
+            except Exception as exc:
+                log.warning("[DISCOVER] series %s fetch failed: %s", series_ticker, exc)
+                break
+            events.extend(resp.get("events") or [])
+            cursor = resp.get("cursor") or ""
+            if not cursor:
+                break
+        return events
+
     async def get_atp_markets(self) -> List[Dict]:
         """
-        Paginate open events, pick tennis / head-to-head style matchups, return markets.
-        No hardcoded players — empty list if nothing qualifies.
+        Discover open H2H tennis markets.
+
+        Fast path: query known tennis series tickers directly (bypasses pagination).
+        Fallback: general open-events pagination for the configured number of pages.
         """
         candidates: List[Tuple[int, Dict, Dict]] = []
-        cursor: Optional[str] = ""
-        max_pages = getattr(self.cfg, "KALSHI_EVENTS_MAX_PAGES", 30)
-        total_scanned = 0
+        env_label = "PRODUCTION" if self.cfg.KALSHI_USE_PROD else "DEMO"
+        log.info("Scanning for tennis markets on %s...", env_label)
 
-        log.info(f"Scanning for tennis markets on {'PRODUCTION' if self.cfg.KALSHI_USE_PROD else 'DEMO'}...")
+        # ── Fast path: query known H2H series directly ─────────────────────────
+        direct_events: List[Dict] = []
+        for series in self._TENNIS_SERIES:
+            batch = await self._fetch_series_events(series)
+            if batch:
+                log.info("[DISCOVER] %s: %d event(s) found", series, len(batch))
+            direct_events.extend(batch)
 
+        # ── Fallback: paginated general scan ───────────────────────────────────
+        max_pages = getattr(self.cfg, "KALSHI_EVENTS_MAX_PAGES", 5)
+        paged_events: List[Dict] = []
+        cursor = ""
         for page in range(max_pages):
             q = "status=open&limit=200&with_nested_markets=true"
             if cursor:
                 q += f"&cursor={quote(cursor, safe='')}"
             try:
-                # Use discovery endpoint for better reliability in finding markets
                 resp = await self._request("GET", f"/events?{q}", use_discovery=True)
-            except Exception as e:
-                log.warning(f"Kalshi events page {page + 1} failed: {e}")
+            except Exception as exc:
+                log.warning("Kalshi events page %d failed: %s", page + 1, exc)
                 break
-
-            events = resp.get("events") or []
-            total_scanned += len(events)
-            log.debug(f"Kalshi: scanning page {page+1}... {len(events)} events found.")
-            
-            for event in events:
-                title = event.get("title", "")
-                cat = (event.get("category") or "").lower()
-                
-                # Fast fail for non-sports
-                if cat != "sports" and "tennis" not in title.lower():
-                    continue
-
-                sc = _score_tennis_event(event)
-
-                # Moved discovery tracking to DEBUG to keep logs clean and reduce latency
-                if cat == "sports" or "tennis" in title.lower() or "atp" in title.lower():
-                    # Check if it's a known non-tennis sport to avoid total spam
-                    non_tennis_sports = ("serie a", "la liga", "premier league", "nba", "nhl", "fifa", "epl", "ucl", "nfl", "ufc")
-                    if not any(s in title.lower() for s in non_tennis_sports):
-                        log.debug(f"Discovery: Analyzing {title} | Series: {event.get('series_ticker')} | Score: {sc}")
-                
-                is_tennis = _is_tennis_event(event)
-                if is_tennis and sc > 0:
-                    log.info(f"TENNIS DETECTED: {title} (Ticker: {event.get('event_ticker')})")
-
-                if not is_tennis:
-                    continue
-                
-                if sc <= 0:
-                    continue
-                    
-                players = _players_from_event(event)
-                if not players:
-                    log.debug(f"SKIPPING event (could not extract players): {title}")
-                    continue
-                player_a, player_b = players
-                markets = event.get("markets") or []
-                if not markets:
-                    et = event.get("event_ticker")
-                    try:
-                        m_resp = await self._request(
-                            "GET", f"/markets?event_ticker={quote(et, safe='')}"
-                        )
-                        markets = m_resp.get("markets") or []
-                    except Exception as ex:
-                        log.warning(f"No nested markets and fetch failed for {et}: {ex}")
-                        continue
-
-                now_ts = time.time()
-                for m in markets:
-                    if m.get("status") != "active":
-                        continue
-                    t = m.get("ticker") or ""
-                    if not t:
-                        continue
-                    # Skip markets whose close_time is already in the past
-                    close_ts = _parse_iso_ts_to_epoch(m.get("close_time", ""))
-                    if close_ts < now_ts:
-                        log.debug(f"Skipping expired market {t} (closed {m.get('close_time')})")
-                        continue
-                    yc, nc = _parse_yes_no_cents(m)
-                    candidates.append(
-                        (
-                            sc,
-                            event,
-                            {
-                                "ticker": t,
-                                "player_a": player_a,
-                                "player_b": player_b,
-                                "title": event.get("title") or "",
-                                "event_ticker": event.get("event_ticker") or "",
-                                "series_ticker": event.get("series_ticker") or "",
-                                "close_time": m.get("close_time", ""),
-                                "yes_price_cents": yc,
-                                "no_price_cents": nc,
-                                "market_data": m,
-                            },
-                        )
-                    )
-                    break
-
+            paged_events.extend(resp.get("events") or [])
             cursor = resp.get("cursor") or ""
             if not cursor:
                 break
-            if len(candidates) >= 400:
-                break
+
+        # Merge, deduplicate by event_ticker
+        seen_tickers: set = set()
+        all_events: List[Dict] = []
+        for ev in direct_events + paged_events:
+            et = ev.get("event_ticker") or ""
+            if et and et not in seen_tickers:
+                seen_tickers.add(et)
+                all_events.append(ev)
+
+        total_scanned = len(all_events)
+        log.info("[DISCOVER] %d unique events to evaluate (direct=%d + paged=%d)",
+                 total_scanned, len(direct_events), len(paged_events))
+
+        # ── Score and filter ───────────────────────────────────────────────────
+        now_ts = time.time()
+        for event in all_events:
+            title = event.get("title", "")
+            sc = _score_tennis_event(event)
+            is_tennis = _is_tennis_event(event)
+
+            if is_tennis and sc > 0:
+                log.info("TENNIS DETECTED: %s (Ticker: %s)", title, event.get("event_ticker"))
+
+            if not is_tennis or sc <= 0:
+                continue
+
+            players = _players_from_event(event)
+            if not players:
+                log.debug("SKIPPING event (could not extract players): %s", title)
+                continue
+            player_a, player_b = players
+
+            markets = event.get("markets") or []
+            if not markets:
+                et = event.get("event_ticker")
+                try:
+                    m_resp = await self._request(
+                        "GET", f"/markets?event_ticker={quote(et, safe='')}"
+                    )
+                    markets = m_resp.get("markets") or []
+                except Exception as ex:
+                    log.warning("No nested markets and fetch failed for %s: %s", et, ex)
+                    continue
+
+            for m in markets:
+                if m.get("status") != "active":
+                    continue
+                t = m.get("ticker") or ""
+                if not t:
+                    continue
+                close_ts = _parse_iso_ts_to_epoch(m.get("close_time", ""))
+                if close_ts < now_ts:
+                    log.debug("Skipping expired market %s", t)
+                    continue
+                yc, nc = _parse_yes_no_cents(m)
+                candidates.append((
+                    sc,
+                    event,
+                    {
+                        "ticker":         t,
+                        "player_a":       player_a,
+                        "player_b":       player_b,
+                        "title":          event.get("title") or "",
+                        "event_ticker":   event.get("event_ticker") or "",
+                        "series_ticker":  event.get("series_ticker") or "",
+                        "close_time":     m.get("close_time", ""),
+                        "yes_price_cents": yc,
+                        "no_price_cents":  nc,
+                        "market_data":    m,
+                    },
+                ))
+                break  # one market per event is enough
 
         def _sort_key(item: Tuple[int, Dict, Dict]):
             sc, event, _ = item
@@ -549,8 +580,9 @@ class KalshiClient:
 
         if not unique:
             log.warning(
-                f"Kalshi: Scanned {total_scanned} events across {page+1} pages. "
-                "No qualifying tennis markets found (check if matches are currently live on Production)."
+                "Kalshi: Scanned %d events. No qualifying H2H tennis markets found. "
+                "Markets may not be live yet — retrying in %ds.",
+                total_scanned, getattr(self.cfg, "DISCOVERY_INTERVAL", 60),
             )
         else:
             log.info(

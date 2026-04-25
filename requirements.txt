@@ -21,3 +21,4 @@ psutil
 numba
 tqdm
 pyarrow
+textual>=0.80.0

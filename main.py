@@ -1026,8 +1026,27 @@ async def run_game_session():
                 log.error("[DISCOVER] Unexpected error: %s", e)
             await asyncio.sleep(_DISCOVERY_INTERVAL)
 
-    disc_task = None
-    workers   = []
+    async def heartbeat_loop():
+        """Write a keep-alive status to live_state.json every 10 s when no match is active."""
+        while True:
+            await asyncio.sleep(10)
+            try:
+                # Only write if the file is more than 8 s old (don't clobber live match data)
+                if os.path.exists(LIVE_STATE_PATH):
+                    age = time.time() - os.path.getmtime(LIVE_STATE_PATH)
+                    if age < 8:
+                        continue
+                _write_live_state(
+                    LIVE_STATE_PATH, "SCANNING", "MARKETS",
+                    {}, {}, {"team_a": 0.5, "team_b": 0.5},
+                    0.0, 0.0, get_trading_mode(), "scanning", None,
+                )
+            except Exception as _hb_exc:
+                log.debug("[HEARTBEAT] write failed: %s", _hb_exc)
+
+    disc_task      = None
+    heartbeat_task = None
+    workers        = []
     try:
         # Initial discovery (don't wait for the 60-s loop)
         await _discover_markets(kalshi, config, queue, active_tickers, seq_counter)
@@ -1039,7 +1058,8 @@ async def run_game_session():
             )
 
         # Background re-discovery: keeps running even when queue starts empty.
-        disc_task = asyncio.create_task(discovery_loop())
+        disc_task      = asyncio.create_task(discovery_loop())
+        heartbeat_task = asyncio.create_task(heartbeat_loop())
 
         workers = [
             asyncio.create_task(
@@ -1062,6 +1082,8 @@ async def run_game_session():
     finally:
         if disc_task:
             disc_task.cancel()
+        if heartbeat_task:
+            heartbeat_task.cancel()
         for w in workers:
             w.cancel()
         log.info("Closing all external connections and saving state...")

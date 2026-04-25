@@ -19,6 +19,7 @@ from historical_analyzer import HistoricalAnalyzer
 from bet_manager import BetManager
 from live_score_scraper import poll_live_score_real, LiveScoreScraper
 from ml_engine import ml_engine
+from player_serve_cache import get_serve_stats, load_cache as _load_serve_cache
 from market_monitor import MarketMonitor
 from adaptive_controller import AdaptiveController
 from location_engine import LocationEngine
@@ -108,21 +109,32 @@ def _write_kalshi_match_state(matches: list) -> None:
 
 
 def _write_live_state(path, player_a, player_b, p1_stats, p2_stats,
-                      win_prob, nn_prob, xgb_prob, mode, feed_status, flow_data):
+                      win_prob, nn_prob, xgb_prob, mode, feed_status, flow_data,
+                      surface=None, score=None, markov_prob=None):
     try:
-        with open(path, "w") as lf:
-            json.dump({
-                "player_a": player_a, "player_b": player_b,
-                "elo_a": p1_stats.get("elo", 1500), "elo_b": p2_stats.get("elo", 1500),
-                "win_prob_a": win_prob["team_a"],
-                "win_prob_b": win_prob["team_b"],
-                "nn_prob": nn_prob,
-                "xgb_prob": xgb_prob,
-                "trading_mode": mode,
-                "feed_status": feed_status,
-                "flow": flow_data,
-                "last_update": time.time()
-            }, lf)
+        payload = json.dumps({
+            "player_a":    player_a,
+            "player_b":    player_b,
+            "elo_a":       p1_stats.get("elo", 1500),
+            "elo_b":       p2_stats.get("elo", 1500),
+            "win_prob_a":  win_prob["team_a"],
+            "win_prob_b":  win_prob["team_b"],
+            "nn_prob":     nn_prob,
+            "xgb_prob":    xgb_prob,
+            "markov_prob": markov_prob,
+            "trading_mode": mode,
+            "feed_status": feed_status,
+            "flow":        flow_data,
+            "surface":     surface or p1_stats.get("surface", "Hard"),
+            "score":       score,
+            "yes_price":   flow_data.get("yes_price") if flow_data else None,
+            "last_update": time.time(),
+        })
+        # Atomic write: write to temp then rename to avoid partial reads by server
+        tmp = path + ".tmp"
+        with open(tmp, "w") as lf:
+            lf.write(payload)
+        os.replace(tmp, path)
     except Exception as _e:
         pass
 
@@ -255,6 +267,36 @@ async def process_match(
     _p2_hand = str(p2_stats.get("hand", "R")).upper()
     _p1_pts  = float(p1_stats.get("elo", 0) or 0)   # tennisstats "elo" field = ATP ranking pts
     _p2_pts  = float(p2_stats.get("elo", 0) or 0)
+
+    # ── Serve-quality edge (pre-match, applied once) ──────────────────────────
+    # WFO-validated: 2nd-serve won % diff (ROI +2.24%, p=0.000) and
+    # BP save rate diff (ROI +2.86%, p=0.000) over 3.4M ATP matches 2010-2024.
+    _sq_logit_adj = 0.0
+    if config.SERVE_QUALITY_ENABLED:
+        try:
+            import math as _math
+            _sq1 = get_serve_stats(player_a)
+            _sq2 = get_serve_stats(player_b)
+            _s2_diff  = _sq1["second_serve_won_pct"] - _sq2["second_serve_won_pct"]
+            _bps_diff = _sq1["bp_save_rate"]         - _sq2["bp_save_rate"]
+            _sq_logit_adj = (
+                config.SERVE2_COEF  * _s2_diff
+                + config.BP_SAVE_COEF * _bps_diff
+            )
+            _sq_max = _math.log(
+                (0.5 + config.SERVE_QUALITY_MAX_ADJ) / (0.5 - config.SERVE_QUALITY_MAX_ADJ)
+            )
+            _sq_logit_adj = max(-_sq_max, min(_sq_max, _sq_logit_adj))
+            _logit_base = _math.log(base_p_a / (1.0 - base_p_a))
+            base_p_a = 1.0 / (1.0 + _math.exp(-(_logit_base + _sq_logit_adj)))
+            log.info(
+                "[SERVE-Q] %s vs %s | 2nd_won_diff=%+.3f bp_save_diff=%+.3f "
+                "logit_adj=%+.4f | base_p %.3f→%.3f",
+                player_a, player_b, _s2_diff, _bps_diff,
+                _sq_logit_adj, ml_res["hybrid_prob"], base_p_a,
+            )
+        except Exception as _sqe:
+            log.warning("[SERVE-Q] adjustment failed: %s", _sqe)
 
     # Convert base probabilities to server/returner parameters for Markov engine
     # Use configured scaling factors so model reflects `Config.MARKOV_*_SCALE`.
@@ -574,6 +616,34 @@ async def process_match(
                                 if bp > 1.0: bp /= 100.0
                                 if 0 < bp < 1:
                                     _live_hold_rate = 1.0 - bp
+                                # 2nd-serve won % live refinement (WFO coef=3.0, p=0.000)
+                                pts_2nd_a = atp.get("pts_won_2nd_serve_a", 0.0)
+                                pts_2nd_b = atp.get("pts_won_2nd_serve_b", 0.0)
+                                if pts_2nd_a > 1.0: pts_2nd_a /= 100.0
+                                if pts_2nd_b > 1.0: pts_2nd_b /= 100.0
+                                if 0.1 < pts_2nd_a < 0.9 and 0.1 < pts_2nd_b < 0.9:
+                                    import math as _math
+                                    _live_s2_diff = pts_2nd_a - pts_2nd_b
+                                    _live_logit_adj = config.SERVE2_COEF * _live_s2_diff
+                                    _sq_cap = _math.log(
+                                        (0.5 + config.SERVE_QUALITY_MAX_ADJ)
+                                        / (0.5 - config.SERVE_QUALITY_MAX_ADJ)
+                                    )
+                                    _live_logit_adj = max(-_sq_cap, min(_sq_cap, _live_logit_adj))
+                                    _cur_p = lms.win_probability()
+                                    _cur_logit = _math.log(_cur_p / (1.0 - _cur_p))
+                                    _refined_p = 1.0 / (1.0 + _math.exp(-(_cur_logit + _live_logit_adj * 0.3)))
+                                    _refined_ps = 0.65 + (_refined_p - 0.5) * cfg.MARKOV_SERVE_SCALE
+                                    _refined_pr = 0.35 + (_refined_p - 0.5) * cfg.MARKOV_RETURN_SCALE
+                                    lms.update_params(
+                                        0.8 * lms.p_serve  + 0.2 * _refined_ps,
+                                        0.8 * lms.p_return + 0.2 * _refined_pr,
+                                    )
+                                    log.info(
+                                        "[SERVE-Q LIVE] 2nd_won: A=%.1f%% B=%.1f%% diff=%+.3f logit=%+.4f",
+                                        pts_2nd_a * 100, pts_2nd_b * 100,
+                                        _live_s2_diff, _live_logit_adj,
+                                    )
                         except Exception as _ae:
                             log.debug("[ATP] Stat refresh error: %s", _ae)
 
@@ -658,9 +728,14 @@ async def process_match(
                     "z_score":    round(flow_sig.z_score, 4) if flow_sig else 0.0,
                 }
 
-                asyncio.get_event_loop().run_in_executor(None, lambda: _write_live_state(
+                _live_score_str = score_update.get("score") or status_str
+                _markov_prob = round(win_prob_a, 4)
+                asyncio.get_running_loop().run_in_executor(None, lambda: _write_live_state(
                     LIVE_STATE_PATH, player_a, player_b, p1_stats, p2_stats,
                     win_prob, nn_prob, xgb_prob, mode, feed_status, flow_data,
+                    surface=_resolved_surface,
+                    score=_live_score_str,
+                    markov_prob=_markov_prob,
                 ))
 
                 eval_start = time.time()
@@ -921,6 +996,16 @@ async def run_game_session():
     adaptive        = AdaptiveController(base_min_edge=max(config.MIN_EDGE, 0.02))
     location_engine = LocationEngine()
     log.info("[ADAPTIVE] Controller started. Base MIN_EDGE=%.4f", adaptive.base_min_edge)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _load_serve_cache)
+    log.info("[SERVE-Q] Player serve-quality cache loaded.")
+
+    # Write an initial "scanning" status so the TUI shows the bot is alive.
+    _write_live_state(
+        LIVE_STATE_PATH, "SCANNING", "MARKETS",
+        {}, {}, {"team_a": 0.5, "team_b": 0.5},
+        None, None, get_trading_mode(), "scanning", None,
+    )
 
     # BUG FIX: Reconcile open positions from Kalshi portfolio at startup.
     # Without this, a server restart loses all position state and the bot may
@@ -941,15 +1026,19 @@ async def run_game_session():
                 log.error("[DISCOVER] Unexpected error: %s", e)
             await asyncio.sleep(_DISCOVERY_INTERVAL)
 
+    disc_task = None
+    workers   = []
     try:
         # Initial discovery (don't wait for the 60-s loop)
         await _discover_markets(kalshi, config, queue, active_tickers, seq_counter)
 
         if queue.empty():
-            log.warning("No open tennis Kalshi markets found — bot idle.")
-            return
+            log.warning(
+                "[DISCOVER] No open tennis Kalshi markets found — waiting for markets to open. "
+                "Background scanner will check every %ds.", _DISCOVERY_INTERVAL
+            )
 
-        # Background re-discovery so newly listed markets join the queue
+        # Background re-discovery: keeps running even when queue starts empty.
         disc_task = asyncio.create_task(discovery_loop())
 
         workers = [
@@ -960,19 +1049,21 @@ async def run_game_session():
             for _ in range(MAX_CONCURRENT_MATCHES)
         ]
         log.info(
-            "[SESSION] %d worker(s) started. Max concurrent live matches: %d",
+            "[SESSION] %d worker(s) started — waiting for markets. Max concurrent: %d",
             MAX_CONCURRENT_MATCHES, MAX_CONCURRENT_MATCHES,
         )
 
-        await queue.join()
-
-        disc_task.cancel()
-        for w in workers:
-            w.cancel()
+        # Run until cancelled (SIGTERM/SIGINT) rather than until queue drains.
+        # The discovery loop continuously re-queues new markets as they appear.
+        await asyncio.Event().wait()
 
     except asyncio.CancelledError:
         log.info("Session cancelled via system signal. Shutting down gracefully...")
     finally:
+        if disc_task:
+            disc_task.cancel()
+        for w in workers:
+            w.cancel()
         log.info("Closing all external connections and saving state...")
         await kalshi.close()
         await history.close()

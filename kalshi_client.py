@@ -381,11 +381,12 @@ class KalshiClient:
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
         if self._http is None or self._http.closed:
             self._http = aiohttp.ClientSession()
+        _timeout = aiohttp.ClientTimeout(total=20, connect=10)
         try:
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    async with self._http.request(method, url, ssl=ssl_ctx, **kwargs) as resp:
+                    async with self._http.request(method, url, ssl=ssl_ctx, timeout=_timeout, **kwargs) as resp:
                         if resp.status == 401 or resp.status == 403:
                             log.error(f"Kalshi AUTH ERROR {resp.status} on {method} {path}. Check your keys and KALSHI_USE_PROD setting.")
                         

@@ -45,29 +45,8 @@ class EloEngine:
     # ──────────────────────────────────────────────────────────────────────────
 
     def seed_from_history(self, h2h: dict):
-        """
-        Adjust starting Elo based on historical head-to-head record.
-        h2h = {
-            "team_a_win_rate": 0.72,   # A wins 72% of games vs B
-            "avg_point_diff": 8.4,     # A wins by 8.4 pts on avg
-            "seasons_sampled": 3
-        }
-        """
-        win_rate  = h2h.get("team_a_win_rate", 0.5)
-        pt_diff   = h2h.get("avg_point_diff", 0.0)
-        threshold = self.cfg.H2H_DOMINANCE_THRESHOLD
-
-        if win_rate >= threshold:
-            bias = self.cfg.ELO_MULTIPLIERS["h2h_dominance"] * abs(pt_diff)
-            self.ratings["team_a"] += bias
-            self.ratings["team_b"] -= bias
-            log.info(f"H2H bias applied: +{bias:.1f} to A (win rate {win_rate:.0%})")
-
-        elif win_rate <= (1 - threshold):
-            bias = self.cfg.ELO_MULTIPLIERS["h2h_underdog"] * abs(pt_diff)
-            self.ratings["team_b"] += abs(bias)
-            self.ratings["team_a"] -= abs(bias)
-            log.info(f"H2H bias applied: +{abs(bias):.1f} to B (A win rate only {win_rate:.0%})")
+        """H2H seeding removed — signal showed no OOS edge."""
+        pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Live event processing

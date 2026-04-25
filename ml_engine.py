@@ -152,8 +152,6 @@ class HybridMLEngine:
                     # Rank differential — single strongest XGBoost predictor for tennis
                     'Rank_Diff': p1_stats.get('ranking', 50) - p2_stats.get('ranking', 50),
                     'Elo_Diff':  p1_rpts - p2_rpts,
-                    # H2H win rate [0..1], defaults to 0.5 if unknown
-                    'P1_H2H_Win_Rate': p1_stats.get('h2h_win_rate', 0.5),
                     # Surface-specific win rates [0..1]
                     'P1_Surface_Win_Rate': p1_stats.get('surface_win_rate', 0.5),
                     'P2_Surface_Win_Rate': p2_stats.get('surface_win_rate', 0.5),

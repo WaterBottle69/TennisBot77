@@ -427,8 +427,10 @@ else:
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["surface_norm"] = df.get("surface", pd.Series("Hard", index=df.index)).map(SURFACE_MAP).fillna("Hard")
-    df["winner_hand_enc"] = (df.get("winner_hand", "R") == "R").astype(np.int8)
-    df["loser_hand_enc"]  = (df.get("loser_hand",  "R") == "R").astype(np.int8)
+    wh = df["winner_hand"] if "winner_hand" in df.columns else pd.Series("R", index=df.index)
+    lh = df["loser_hand"]  if "loser_hand"  in df.columns else pd.Series("R", index=df.index)
+    df["winner_hand_enc"] = (wh == "R").astype(np.int8)
+    df["loser_hand_enc"]  = (lh == "R").astype(np.int8)
 
     for col in ["winner_ht", "loser_ht", "winner_age", "loser_age",
                 "winner_rank", "loser_rank", "winner_rank_points", "loser_rank_points"]:
@@ -637,8 +639,8 @@ def run_monte_carlo(
     n   = len(pnl)
     all_paths = []
 
-    if _HAS_TORCH:
-        device     = torch.device(_GPU_DEVICE)
+    if _HAS_TORCH and _CUDA_AVAILABLE:
+        device     = torch.device("cuda")
         pnl_tensor = torch.tensor(pnl, device=device)
         log.info(f"  Monte Carlo: {n_iterations:,} paths × {n} bets  on {device}")
 
@@ -646,14 +648,12 @@ def run_monte_carlo(
         done  = 0
         while done < n_iterations:
             batch = min(chunk_size, n_iterations - done)
-            # Random bootstrap indices — all generated on GPU
             idx      = torch.randint(0, n, (batch, n), device=device)
-            shuffled = pnl_tensor[idx]                       # (batch, n)
+            shuffled = pnl_tensor[idx]
             paths    = bankroll_init + torch.cumsum(shuffled, dim=1)
             paths    = torch.clamp(paths, min=0.0)
-            # Prepend bankroll_init column
             init_col = torch.full((batch, 1), bankroll_init, device=device)
-            paths    = torch.cat([init_col, paths], dim=1)   # (batch, n+1)
+            paths    = torch.cat([init_col, paths], dim=1)
             all_paths.append(paths.cpu().numpy())
             done += batch
 
@@ -661,15 +661,20 @@ def run_monte_carlo(
         return np.concatenate(all_paths, axis=0)
 
     else:
-        # Pure numpy fallback
-        log.info(f"  Monte Carlo (numpy): {n_iterations:,} paths")
+        # Vectorised numpy — stable on CPU (no torch segfault risk)
+        log.info(f"  Monte Carlo (numpy): {n_iterations:,} paths × {n} bets  on cpu")
+        rng = np.random.default_rng(42)
         results = np.empty((n_iterations, n + 1), dtype=np.float32)
         results[:, 0] = bankroll_init
-        for i in tqdm(range(n_iterations), desc="Monte Carlo"):
-            shuffled = np.random.choice(pnl, size=n, replace=True)
-            path     = bankroll_init + np.cumsum(shuffled)
-            path     = np.maximum(path, 0.0)
-            results[i, 1:] = path
+        chunk = 500
+        for start in tqdm(range(0, n_iterations, chunk), desc="Monte Carlo"):
+            end = min(start + chunk, n_iterations)
+            b   = end - start
+            idx = rng.integers(0, n, size=(b, n))
+            shuffled = pnl[idx]
+            paths = bankroll_init + np.cumsum(shuffled, axis=1)
+            np.maximum(paths, 0.0, out=paths)
+            results[start:end, 1:] = paths
         return results
 
 

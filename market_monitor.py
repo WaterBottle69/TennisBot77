@@ -80,17 +80,16 @@ class MarketMonitor:
         self._model_prob: float = 0.5   # updated by caller via set_model_prob()
 
     async def run(self):
-        """Background loop. Cancel to stop."""
+        """Background loop. Connects to WebSocket stream and blocks."""
         self._running = True
-        log.info(f"[FLOW] MarketMonitor started for {self.ticker}")
-        while self._running:
-            try:
-                await self._poll_and_update()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                log.debug(f"[FLOW] Poll error for {self.ticker}: {e}")
-            await asyncio.sleep(self.POLL_INTERVAL)
+        log.info(f"[FLOW] MarketMonitor started for {self.ticker} via WebSocket")
+        try:
+            # This will block and continuously call _on_ws_update as messages arrive
+            await self.kalshi.stream_orderbook(self.ticker, self._on_ws_update)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._running = False
         log.info(f"[FLOW] MarketMonitor stopped for {self.ticker}")
 
     def stop(self):
@@ -102,32 +101,44 @@ class MarketMonitor:
         """
         self._model_prob = max(0.01, min(0.99, p_model))
 
-    async def _poll_and_update(self):
-        """Fetch market state and compute signal."""
-        data = await self.kalshi.get_market(self.ticker)
-        if not data:
-            return
+    async def _on_ws_update(self, msg: dict):
+        """Callback for Kalshi WebSocket orderbook messages."""
+        msg_type = msg.get("type", "")
+        # msg structure can vary between V1/V2, but Kalshi V2 puts payload in msg["msg"]
+        payload = msg.get("msg", msg)
+        
+        bids = payload.get("bids", [])
+        asks = payload.get("asks", [])
+        
+        # Kalshi usually sends arrays of [price_cents, quantity]
+        # Bids are what people are willing to pay for YES (we can sell to them).
+        # Asks are what people are selling YES for (we can buy from them).
+        
+        # To get the top of book YES price, we look at the lowest ask (if we want to buy)
+        # or highest bid (if we want to sell). We'll take the mid-market or lowest ask.
+        yes_ask_cents = min((p[0] for p in asks), default=None)
+        yes_bid_cents = max((p[0] for p in bids), default=None)
 
-        # get_market() returns yes_price / no_price (already 0..1 floats)
-        yes_price = data.get("yes_price", 0.50)
-        no_price  = data.get("no_price",  0.50)
+        if yes_ask_cents is None and yes_bid_cents is None:
+            return  # Empty orderbook update
 
-        # Also check _raw for bid/ask spread if present
-        raw = data.get("_raw") or {}
-        yes_bid_raw = raw.get("yes_bid") or raw.get("yes_ask")
-        yes_ask_raw = raw.get("yes_ask") or raw.get("yes_bid")
-        if yes_bid_raw and yes_ask_raw:
-            yes_bid = int(yes_bid_raw) / 100.0
-            yes_ask = int(yes_ask_raw) / 100.0
-            spread = abs(yes_ask - yes_bid)
+        # Default fallback logic if one side of the book is empty
+        if yes_ask_cents is not None and yes_bid_cents is not None:
+            yes_price = (yes_ask_cents + yes_bid_cents) / 2.0 / 100.0
+            spread = abs(yes_ask_cents - yes_bid_cents) / 100.0
+        elif yes_ask_cents is not None:
+            yes_price = yes_ask_cents / 100.0
+            spread = 0.02
         else:
-            spread = 0.02   # default 2¢ spread estimate when bid/ask unavailable
+            yes_price = yes_bid_cents / 100.0
+            spread = 0.02
 
-        # Volume imbalance (if available in _raw)
-        vol_yes = raw.get("yes_volume",  0) or 0
-        vol_no  = raw.get("no_volume",   0) or 0
-        total_vol = vol_yes + vol_no
-        imbalance = (vol_yes / total_vol) if total_vol > 0 else 0.5
+        # Volume imbalance (if we want to approximate from book depth)
+        # Sum quantities on both sides
+        vol_yes_bid = sum(p[1] for p in bids)
+        vol_yes_ask = sum(p[1] for p in asks)
+        total_vol = vol_yes_bid + vol_yes_ask
+        imbalance = (vol_yes_bid / total_vol) if total_vol > 0 else 0.5
 
         now = time.time()
         self._price_history.append((now, yes_price))
@@ -156,10 +167,12 @@ class MarketMonitor:
         )
 
         log.debug(
-            f"[FLOW] {self.ticker} | YES={yes_price:.3f} "
+            f"[FLOW WS] {self.ticker} | YES={yes_price:.3f} "
             f"vel={velocity*100:+.3f}¢/s vol={volatility*100:.3f}¢ "
             f"regime={vol_regime} Z={z_score:+.2f} → {direction.value}"
         )
+
+
 
     def _compute_velocity(self, now: float) -> float:
         """Linear regression slope of yes_price over the trailing window."""

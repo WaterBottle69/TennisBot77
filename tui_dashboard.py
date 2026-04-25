@@ -1,278 +1,435 @@
-from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Footer, Static, Log, Button
-from textual.reactive import reactive
+"""
+TennisBot77 Terminal Dashboard  —  tui_dashboard.py
+Run:  ./start.sh tui   or   python tui_dashboard.py
+"""
+
+from __future__ import annotations
 import asyncio
 import json
 import os
+import time
+from collections import deque
+from datetime import datetime
 
-BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
-LIVE_STATE_PATH = os.path.join(BASE_DIR, "live_state.json")
-BOT_LOG_PATH    = os.path.join(BASE_DIR, "bot.log")
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal, Vertical
+from textual.reactive import reactive
+from textual.widgets import Header, Footer, Static, Log, Sparkline
+from textual.widget import Widget
+
+BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
+LIVE_STATE_PATH  = os.path.join(BASE_DIR, "live_state.json")
+BOT_LOG_PATH     = os.path.join(BASE_DIR, "bot.log")
+TUI_EVENTS_PATH  = os.path.join(BASE_DIR, "tui_events.jsonl")
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _bar(prob: float, width: int = 22, color: str = "green") -> str:
+    prob   = max(0.0, min(1.0, float(prob or 0)))
+    filled = int(round(prob * width))
+    return f"[{color}]{'█' * filled}[/][#555555]{'░' * (width - filled)}[/]"
 
 
-class MatchStatusPanel(Static):
-    """Displays live score and current players."""
-    match_data: reactive[dict] = reactive({}, recompose=True)
+def _ago(ts: float) -> str:
+    d = time.time() - ts
+    if d < 2:   return "[bold green]NOW[/]"
+    if d < 10:  return f"[green]{d:.1f}s ago[/]"
+    if d < 60:  return f"[yellow]{d:.0f}s ago[/]"
+    return f"[red]{d/60:.1f}m ago[/]"
+
+
+def _read_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _read_tail(path: str, offset: int):
+    with open(path, "r", encoding="utf-8") as f:
+        f.seek(offset)
+        return f.tell() if f.seek(0, 2) == 0 else None, f.readlines()
+
+
+# ── Panels ────────────────────────────────────────────────────────────────────
+
+class MatchPanel(Static):
+    """Big live match card: players, score, probs, live indicator."""
+    data: reactive[dict] = reactive({}, recompose=True)
 
     def on_mount(self) -> None:
-        self.border_title = "Match Status"
+        self.border_title = "MATCH"
 
     def render(self) -> str:
-        if not self.match_data:
-            return "Waiting for engine..."
+        d = self.data
+        if not d or d.get("feed_status") in (None, "scanning"):
+            return ("[bold yellow]● SCANNING[/] — waiting for live market\n\n"
+                    "Run [cyan]./start.sh[/] and Kalshi will be scanned automatically.")
 
-        p_a    = self.match_data.get("player_a") or "Player A"
-        p_b    = self.match_data.get("player_b") or "Player B"
-        status = self.match_data.get("feed_status") or "UNKNOWN"
-        score  = self.match_data.get("score") or ""
-        score_line = f"\nScore: [white]{score}[/]" if score else ""
+        pa   = (d.get("player_a") or "Player A").upper()
+        pb   = (d.get("player_b") or "Player B").upper()
+        wa   = float(d.get("win_prob_a") or 0.5)
+        wb   = float(d.get("win_prob_b") or 0.5)
+        score = d.get("score") or "—"
+        surf  = d.get("surface") or "Hard"
+        fs    = (d.get("feed_status") or "unknown").upper()
+        ticker = d.get("ticker") or ""
+
+        live_tag = "[bold green]● LIVE[/]" if fs == "LIVE" else f"[bold yellow]◌ {fs}[/]"
 
         return (
-            f"[bold green]{p_a}[/] [white]vs[/] [bold blue]{p_b}[/]"
-            f"{score_line}\n\n"
-            f"Feed Status: [bold yellow]{status.upper()}[/]"
+            f"{live_tag}  [{surf.lower() == 'clay' and 'red' or 'cyan'}]{surf}[/]"
+            f"  [dim]{ticker}[/]\n\n"
+            f"[bold white]{pa}[/]\n"
+            f"  {_bar(wa, 24, 'green')} [bold green]{wa*100:4.1f}%[/]\n\n"
+            f"[bold white]{pb}[/]\n"
+            f"  {_bar(wb, 24, 'blue')}  [bold blue]{wb*100:4.1f}%[/]\n\n"
+            f"Score: [bold yellow]{score}[/]  "
+            f"Updated: {_ago(float(d.get('last_update') or 0))}"
         )
 
 
-class EngineStatsPanel(Static):
-    """Displays Neural Net, XGBoost, and Markov Stats."""
-    stats_data: reactive[dict] = reactive({}, recompose=True)
+class EnginePanel(Static):
+    """Neural net / XGB / Markov probability bars + flow signal."""
+    data: reactive[dict] = reactive({}, recompose=True)
 
     def on_mount(self) -> None:
-        self.border_title = "Engine Stats & Probability Charts"
-
-    def _render_bar(self, prob: float, color: str) -> str:
-        bar_len = 20
-        prob    = max(0.0, min(1.0, float(prob)))
-        filled  = int(round(prob * bar_len))
-        empty   = bar_len - filled
-        return f"[{color}]{'█' * filled}[/][#444444]{'░' * empty}[/]"
+        self.border_title = "ENGINE SIGNALS"
 
     def render(self) -> str:
-        if not self.stats_data:
-            return "Initializing..."
+        d = self.data
+        if not d:
+            return "Initializing engines..."
 
-        nn_prob  = float(self.stats_data.get("nn_prob")  or 0.0)
-        xgb_prob = float(self.stats_data.get("xgb_prob") or 0.0)
-        p_a_live = float(self.stats_data.get("win_prob_a") or 0.0)
-        p_b_live = float(self.stats_data.get("win_prob_b") or 0.0)
-        mode     = self.stats_data.get("trading_mode") or "normal"
+        nn   = float(d.get("nn_prob")    or 0.0)
+        xgb  = float(d.get("xgb_prob")   or 0.0)
+        mkv  = float(d.get("markov_prob") or float(d.get("win_prob_a") or 0.5))
+        mode = (d.get("trading_mode") or "normal").upper()
+        pa   = (d.get("player_a") or "A")[:12]
 
-        bar_a = self._render_bar(p_a_live, "green")
-        bar_b = self._render_bar(p_b_live, "blue")
+        flow = d.get("flow") or {}
+        yp   = float(flow.get("yes_price") or d.get("yes_price") or 0.5)
+        zsc  = float(flow.get("z_score")   or 0.0)
+        vel  = float(flow.get("velocity")  or 0.0)
+        dire = (flow.get("direction") or "NEUTRAL").upper()
+        z_col = "magenta" if abs(zsc) >= 2 else ("yellow" if abs(zsc) >= 1 else "white")
+        d_col = "green" if dire == "CONFIRM" else ("red" if dire == "FADE" else "white")
+
+        edge_y = d.get("edge_yes")
+        edge_n = d.get("edge_no")
+        edge_line = ""
+        if edge_y is not None:
+            ec = "green" if (edge_y or 0) > 0.02 else "red"
+            edge_line = f"\nEdge YES: [{ec}]{(edge_y or 0)*100:+.1f}%[/]"
+        if edge_n is not None:
+            ec2 = "green" if (edge_n or 0) > 0.02 else "red"
+            edge_line += f"  Edge NO: [{ec2}]{(edge_n or 0)*100:+.1f}%[/]"
+
+        last_act = d.get("last_action")
+        act_line = f"\nLast action: [bold]{last_act}[/]" if last_act else ""
 
         return (
-            f"[b]Machine Learning Baseline[/b]\n"
-            f"Neural Net (LSTM): [magenta]{nn_prob*100:.1f}%[/]\n"
-            f"XGBoost: [cyan]{xgb_prob*100:.1f}%[/]\n\n"
-            f"[b]Live Markov Chain DP (Real-Time)[/b]\n"
-            f"Player A ({p_a_live*100:4.1f}%): {bar_a}\n"
-            f"Player B ({p_b_live*100:4.1f}%): {bar_b}\n\n"
-            f"Trading Mode: [b]{mode.upper()}[/b]"
+            f"[b]ML Baseline (for {pa})[/b]\n"
+            f"NN LSTM:  {_bar(nn, 20, 'magenta')} [magenta]{nn*100:4.1f}%[/]\n"
+            f"XGBoost:  {_bar(xgb, 20, 'cyan')}   [cyan]{xgb*100:4.1f}%[/]\n"
+            f"Markov DP:{_bar(mkv, 20, 'green')}  [green]{mkv*100:4.1f}%[/]\n\n"
+            f"[b]Kalshi Flow[/b]\n"
+            f"YES Price: [yellow]{yp*100:.1f}¢[/]  "
+            f"Z: [{z_col}]{zsc:+.2f}[/]  "
+            f"[{d_col}]{dire}[/] ({vel:+.3f}¢/s)\n\n"
+            f"Mode: [bold]{mode}[/]"
+            f"{edge_line}{act_line}"
         )
 
 
-class FlowPanel(Static):
-    """Displays Kalshi orderbook flow and Z-Scores."""
-    flow_data: reactive[dict] = reactive({}, recompose=True)
+class TradeLogPanel(Log):
+    """Scrolling trade event log parsed from tui_events.jsonl + bot.log."""
+    pass
+
+
+class BotLogPanel(Log):
+    """Filtered bot.log tail — shows key events, suppresses noise."""
+    pass
+
+
+class ProbSparkline(Widget):
+    """Win-probability sparkline for Player A over recent ticks."""
+    history: reactive[list] = reactive([], recompose=True)
 
     def on_mount(self) -> None:
-        self.border_title = "Kalshi Tape / Flow"
+        self.border_title = "Win Prob A — History (last 80 ticks)"
 
-    def render(self) -> str:
-        if not self.flow_data:
-            return "Initializing..."
+    def compose(self) -> ComposeResult:
+        vals = list(self.history) or [0.5]
+        yield Sparkline(vals, summary_function=max)
 
-        direction = self.flow_data.get("direction") or "NEUTRAL"
-        vel       = float(self.flow_data.get("velocity")  or 0.0)
-        z_score   = float(self.flow_data.get("z_score")   or 0.0)
-        price     = float(self.flow_data.get("yes_price") or 0.5) * 100
+    def watch_history(self, vals: list) -> None:
+        try:
+            sp = self.query_one(Sparkline)
+            sp.data = vals or [0.5]
+        except Exception:
+            pass
 
-        dir_color = "green" if direction == "CONFIRM" else ("red" if direction == "FADE" else "white")
-        z_color   = "magenta" if abs(z_score) >= 2.0 else "white"
 
-        return (
-            f"Live YES Price: [yellow]{price:.1f}¢[/]\n\n"
-            f"[b]Algorithmic Signals[/b]\n"
-            f"Momentum: [{dir_color}]{direction}[/] ({vel:+.3f}¢/s)\n"
-            f"Mispricing Z-Score: [{z_color}]{z_score:+.2f}[/]\n"
-        )
-
+# ── Main App ──────────────────────────────────────────────────────────────────
 
 class TennisBotTUI(App):
-    """The main TUI Application."""
+    """TennisBot77 terminal dashboard."""
 
     CSS = """
     Screen {
-        layout: horizontal;
         background: $surface;
-        padding: 1 2;
     }
 
-    #left_column {
-        width: 60%;
-        height: 100%;
+    /* ── columns ── */
+    #main_row {
+        height: 1fr;
+        layout: horizontal;
+    }
+    #left_col {
+        width: 58%;
+        layout: vertical;
+    }
+    #right_col {
+        width: 42%;
         layout: vertical;
     }
 
-    #right_column {
-        width: 40%;
-        height: 100%;
-        layout: vertical;
-    }
+    /* ── panel sizing ── */
+    #match_panel   { height: 35%; border: round cyan;    padding: 0 1; margin: 0 1 0 1; }
+    #spark_panel   { height: 13%; border: round #444;    padding: 0 1; margin: 0 1 0 1; }
+    #tradelog      { height: 52%; border: round #22aa44; padding: 0 1; margin: 0 1 1 1; }
 
-    .panel {
-        border: round cyan;
-        padding: 1;
-        margin: 1;
-        background: $background;
-        color: $text;
-    }
+    #engine_panel  { height: 55%; border: round magenta; padding: 0 1; margin: 0 1 0 0; }
+    #botlog        { height: 45%; border: round #3399ff; padding: 0 1; margin: 0 1 1 0; }
 
-    #match_panel {
-        height: 25%;
-    }
+    Sparkline { height: 1fr; }
 
-    #flow_panel {
-        height: 30%;
-    }
-
-    #log_panel {
-        height: 45%;
-        border: round green;
-    }
-
-    #engine_panel {
-        height: 50%;
-    }
-
-    #controls_panel {
-        height: 50%;
-        align: center middle;
-    }
-
-    Button {
-        margin: 1 2;
-        min-width: 20;
-    }
+    /* text sizes */
+    #match_panel Static { color: $text; }
     """
 
     BINDINGS = [
-        ("d", "toggle_dark", "Toggle dark mode"),
+        ("d", "toggle_dark", "Dark"),
         ("q", "quit", "Quit"),
+        ("c", "clear_logs", "Clear Logs"),
     ]
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        with Horizontal():
-            with Vertical(id="left_column"):
-                yield MatchStatusPanel(id="match_panel", classes="panel")
-                yield FlowPanel(id="flow_panel", classes="panel")
-                yield Log(id="log_panel", classes="panel")
-            with Vertical(id="right_column"):
-                yield EngineStatsPanel(id="engine_panel", classes="panel")
-                with Vertical(id="controls_panel", classes="panel"):
-                    yield Static("[b]System Controls[/b]", classes="label")
-                    yield Button("Start Engine", id="btn_start", variant="success")
-                    yield Button("Stop Engine",  id="btn_stop",  variant="error")
-                    yield Button("Toggle Mode (HF/Normal)", id="btn_mode", variant="primary")
+        yield Header(show_clock=True)
+        with Horizontal(id="main_row"):
+            with Vertical(id="left_col"):
+                yield MatchPanel(id="match_panel")
+                yield ProbSparkline(id="spark_panel")
+                yield TradeLogPanel(id="tradelog", highlight=True, markup=True)
+            with Vertical(id="right_col"):
+                yield EnginePanel(id="engine_panel")
+                yield BotLogPanel(id="botlog", highlight=True, markup=True)
         yield Footer()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        log_widget = self.query_one(Log)
-        if event.button.id == "btn_start":
-            log_widget.write_line("[bold green]> Engine started (Simulation)[/]")
-        elif event.button.id == "btn_stop":
-            log_widget.write_line("[bold red]> Engine stopped[/]")
-        elif event.button.id == "btn_mode":
-            log_widget.write_line("[bold blue]> Toggling High-Frequency Mode...[/]")
+    # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self.title = "TennisBot77 TUI"
-        self.last_log_size = os.path.getsize(BOT_LOG_PATH) if os.path.exists(BOT_LOG_PATH) else 0
-        self._last_state_mtime: float = 0.0
+        self.title = "TennisBot77"
+        self.sub_title = "scanning…"
 
-        log_widget = self.query_one(Log)
-        log_widget.border_title = "System Logs"
-        log_widget.write_line(f"[green]TennisBot77 TUI Initialized.[/green]")
-        log_widget.write_line(f"Watching: {LIVE_STATE_PATH}")
-        log_widget.write_line("Awaiting connection to main.py engine...")
+        self._state_mtime:  float = 0.0
+        self._events_mtime: float = 0.0
+        self._log_offset:   int   = 0
+        self._prob_history: deque[float] = deque(maxlen=80)
+        self._tick: int = 0
 
-        self.set_interval(0.25, self.poll_state_files)
-        self.set_interval(0.5,  self.poll_logs)
+        tradelog = self.query_one("#tradelog", TradeLogPanel)
+        tradelog.border_title = "TRADE LOG"
+        tradelog.write_line("[dim]Waiting for first trade evaluation…[/dim]")
 
-    async def poll_state_files(self) -> None:
-        """Poll live_state.json; only parse when the file has actually changed."""
+        botlog = self.query_one("#botlog", BotLogPanel)
+        botlog.border_title = "BOT LOG"
+        botlog.write_line(f"[dim]Watching {BOT_LOG_PATH}[/dim]")
+
+        # Seek to end of existing bot.log so we only show new lines
+        self._log_offset = os.path.getsize(BOT_LOG_PATH) if os.path.exists(BOT_LOG_PATH) else 0
+
+        self.set_interval(0.3,  self._poll_state)
+        self.set_interval(0.5,  self._poll_events)
+        self.set_interval(0.5,  self._poll_botlog)
+
+    # ── polling ───────────────────────────────────────────────────────────────
+
+    async def _poll_state(self) -> None:
         if not os.path.exists(LIVE_STATE_PATH):
             return
         try:
             mtime = os.path.getmtime(LIVE_STATE_PATH)
-            if mtime <= self._last_state_mtime:
+            if mtime <= self._state_mtime:
                 return
-            self._last_state_mtime = mtime
+            self._state_mtime = mtime
 
-            data = await asyncio.to_thread(self._read_json, LIVE_STATE_PATH)
-            if data is None:
+            data = await asyncio.to_thread(_read_json, LIVE_STATE_PATH)
+            if not data:
                 return
 
-            match_panel  = self.query_one("#match_panel",  MatchStatusPanel)
-            engine_panel = self.query_one("#engine_panel", EngineStatsPanel)
-            flow_panel   = self.query_one("#flow_panel",   FlowPanel)
+            match_panel  = self.query_one("#match_panel",  MatchPanel)
+            engine_panel = self.query_one("#engine_panel", EnginePanel)
+            spark        = self.query_one("#spark_panel",  ProbSparkline)
 
-            # Force reactivity: assign new dict objects so Textual detects the change
-            match_panel.match_data   = dict(data)
-            engine_panel.stats_data  = dict(data)
-            flow_panel.flow_data     = dict(data.get("flow") or {})
-
+            match_panel.data  = dict(data)
+            engine_panel.data = dict(data)
             match_panel.refresh()
             engine_panel.refresh()
-            flow_panel.refresh()
+
+            wa = float(data.get("win_prob_a") or 0.5)
+            self._prob_history.append(wa)
+            spark.history = list(self._prob_history)
+
+            # Update subtitle with live match name
+            pa = data.get("player_a") or ""
+            pb = data.get("player_b") or ""
+            fs = (data.get("feed_status") or "").lower()
+            if pa and pb and fs not in ("scanning", ""):
+                self.sub_title = f"{pa} vs {pb}  ●  {fs.upper()}"
+            else:
+                self.sub_title = "scanning…"
+
+            self._tick += 1
         except Exception as exc:
-            self.query_one(Log).write_line(f"[red][TUI ERR] poll_state_files: {exc}[/red]")
+            self.query_one("#botlog", BotLogPanel).write_line(
+                f"[red][poll_state] {exc}[/red]"
+            )
+
+    async def _poll_events(self) -> None:
+        if not os.path.exists(TUI_EVENTS_PATH):
+            return
+        try:
+            mtime = os.path.getmtime(TUI_EVENTS_PATH)
+            if mtime <= self._events_mtime:
+                return
+            self._events_mtime = mtime
+
+            lines_raw = await asyncio.to_thread(self._read_events)
+            tradelog  = self.query_one("#tradelog", TradeLogPanel)
+            for ev in lines_raw:
+                tradelog.write_line(self._format_event(ev))
+        except Exception as exc:
+            self.query_one("#botlog", BotLogPanel).write_line(
+                f"[red][poll_events] {exc}[/red]"
+            )
 
     @staticmethod
-    def _read_json(path: str):
-        with open(path, "r") as f:
-            return json.load(f)
+    def _read_events() -> list[dict]:
+        """Read ALL lines from tui_events.jsonl and return parsed dicts."""
+        out: list[dict] = []
+        if not os.path.exists(TUI_EVENTS_PATH):
+            return out
+        with open(TUI_EVENTS_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    pass
+        return out[-50:]  # last 50 events
 
-    async def poll_logs(self) -> None:
-        """Tail bot.log for new lines."""
+    @staticmethod
+    def _format_event(ev: dict) -> str:
+        ts   = datetime.fromtimestamp(float(ev.get("t") or time.time())).strftime("%H:%M:%S")
+        pa   = (ev.get("pa") or "")[:12]
+        pb   = (ev.get("pb") or "")[:12]
+        sc   = ev.get("score") or "—"
+        wa   = float(ev.get("prob_a") or 0.5)
+        buys = int(ev.get("buys") or 0)
+        pnl  = float(ev.get("pnl") or 0.0)
+        mode = (ev.get("mode") or "").upper()
+        nn   = ev.get("nn")
+        xgb  = ev.get("xgb")
+        nn_s  = f" NN={nn*100:.0f}%" if nn is not None else ""
+        xgb_s = f" XGB={xgb*100:.0f}%" if xgb is not None else ""
+        pnl_c = "green" if pnl >= 0 else "red"
+        wa_c  = "green" if wa >= 0.55 else ("red" if wa <= 0.45 else "yellow")
+
+        return (
+            f"[dim]{ts}[/dim] [bold]{pa}[/bold] vs [bold]{pb}[/bold] "
+            f"[{wa_c}]{wa*100:.1f}%[/] score=[yellow]{sc}[/]"
+            f"{nn_s}{xgb_s} buys=[cyan]{buys}[/] "
+            f"P&L=[{pnl_c}]{pnl:+.2f}[/] [{mode}]"
+        )
+
+    async def _poll_botlog(self) -> None:
         if not os.path.exists(BOT_LOG_PATH):
             return
         try:
             size = os.path.getsize(BOT_LOG_PATH)
-            if size < self.last_log_size:
-                self.last_log_size = 0
-            if size <= self.last_log_size:
+            if size < self._log_offset:
+                self._log_offset = 0
+            if size <= self._log_offset:
                 return
 
-            lines = await asyncio.to_thread(self._read_tail, BOT_LOG_PATH, self.last_log_size)
-            new_size, new_lines = lines
-            self.last_log_size = new_size
+            new_size, new_lines = await asyncio.to_thread(
+                self._tail_log, BOT_LOG_PATH, self._log_offset
+            )
+            self._log_offset = new_size
 
-            log_widget = self.query_one(Log)
-            for line in new_lines:
-                line = line.strip()
+            botlog = self.query_one("#botlog", BotLogPanel)
+            tradelog = self.query_one("#tradelog", TradeLogPanel)
+
+            for raw in new_lines:
+                line = raw.strip()
                 if not line:
                     continue
+
+                # Route trade-decision lines to trade log
+                if any(k in line for k in ("Skipping:", "BUY YES", "BUY NO",
+                                            "[CONVERGENCE]", "[FLOW] FADE",
+                                            "[STATS-GATE]", "[MTO]", "[HF MODE]",
+                                            "[MEAN-REV]", "DRY_RUN")):
+                    tradelog.write_line(self._style_trade_line(line))
+                    continue
+
+                # Style and route bot log
                 if "[ERROR]" in line:
-                    log_widget.write_line(f"[red]{line}[/red]")
+                    botlog.write_line(f"[bold red]{line}[/bold red]")
                 elif "[WARNING]" in line:
-                    log_widget.write_line(f"[yellow]{line}[/yellow]")
-                elif "[FLOW WS]" in line:
-                    log_widget.write_line(f"[cyan]{line}[/cyan]")
+                    botlog.write_line(f"[yellow]{line}[/yellow]")
+                elif "TENNIS DETECTED" in line:
+                    botlog.write_line(f"[bold green]{line}[/bold green]")
+                elif "[DISCOVER]" in line or "SCANNING" in line:
+                    botlog.write_line(f"[cyan]{line}[/cyan]")
+                elif "[LOCATION]" in line or "[SERVE" in line:
+                    botlog.write_line(f"[dim]{line}[/dim]")
                 else:
-                    log_widget.write_line(line)
+                    botlog.write_line(line)
         except Exception as exc:
-            self.query_one(Log).write_line(f"[red][TUI ERR] poll_logs: {exc}[/red]")
+            pass  # log read errors are transient
 
     @staticmethod
-    def _read_tail(path: str, offset: int):
-        with open(path, "r") as f:
+    def _tail_log(path: str, offset: int):
+        with open(path, "r", encoding="utf-8") as f:
             f.seek(offset)
             lines = f.readlines()
             return f.tell(), lines
+
+    @staticmethod
+    def _style_trade_line(line: str) -> str:
+        """Apply rich markup to a trade-decision log line."""
+        if "BUY YES" in line or "BUY NO" in line:
+            return f"[bold green]{line}[/bold green]"
+        if "Skipping:" in line:
+            return f"[dim]{line}[/dim]"
+        if "[STATS-GATE]" in line or "[MTO]" in line:
+            return f"[bold red]{line}[/bold red]"
+        if "[CONVERGENCE]" in line and "BOOST" in line:
+            return f"[bold cyan]{line}[/bold cyan]"
+        if "[FLOW] FADE" in line:
+            return f"[red]{line}[/red]"
+        if "[MEAN-REV]" in line:
+            return f"[bold yellow]{line}[/bold yellow]"
+        return f"[yellow]{line}[/yellow]"
+
+    # ── actions ───────────────────────────────────────────────────────────────
+
+    def action_clear_logs(self) -> None:
+        self.query_one("#tradelog", TradeLogPanel).clear()
+        self.query_one("#botlog",   BotLogPanel).clear()
 
 
 if __name__ == "__main__":

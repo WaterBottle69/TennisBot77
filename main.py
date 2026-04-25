@@ -114,9 +114,33 @@ def _write_kalshi_match_state(matches: list) -> None:
         json.dump(state, f, indent=2)
 
 
+TUI_EVENTS_PATH = os.path.join(BASE_DIR, "tui_events.jsonl")
+_TUI_EVENTS_MAX = 200   # keep last N events in the file
+
+
+def _append_tui_event(event: dict) -> None:
+    """Append one trade/eval event to tui_events.jsonl (rolling, max _TUI_EVENTS_MAX lines)."""
+    try:
+        line = json.dumps({**event, "t": time.time()}) + "\n"
+        tmp = TUI_EVENTS_PATH + ".tmp"
+        # Read existing lines, keep last N-1, append new one
+        existing: list[str] = []
+        if os.path.exists(TUI_EVENTS_PATH):
+            with open(TUI_EVENTS_PATH, "r", encoding="utf-8") as f:
+                existing = f.readlines()
+        existing = existing[-(  _TUI_EVENTS_MAX - 1):]
+        existing.append(line)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(existing)
+        os.replace(tmp, TUI_EVENTS_PATH)
+    except Exception:
+        pass
+
+
 def _write_live_state(path, player_a, player_b, p1_stats, p2_stats,
                       win_prob, nn_prob, xgb_prob, mode, feed_status, flow_data,
-                      surface=None, score=None, markov_prob=None):
+                      surface=None, score=None, markov_prob=None,
+                      ticker=None, edge_yes=None, edge_no=None, last_action=None):
     try:
         payload = json.dumps({
             "player_a":    player_a,
@@ -134,6 +158,10 @@ def _write_live_state(path, player_a, player_b, p1_stats, p2_stats,
             "surface":     surface or p1_stats.get("surface", "Hard"),
             "score":       score,
             "yes_price":   flow_data.get("yes_price") if flow_data else None,
+            "ticker":      ticker,
+            "edge_yes":    round(edge_yes, 4) if edge_yes is not None else None,
+            "edge_no":     round(edge_no, 4)  if edge_no  is not None else None,
+            "last_action": last_action,
             "last_update": time.time(),
         })
         # Atomic write: write to temp then rename to avoid partial reads by server
@@ -742,7 +770,26 @@ async def process_match(
                     surface=_resolved_surface,
                     score=_live_score_str,
                     markov_prob=_markov_prob,
+                    ticker=ticker,
                 ))
+
+                # Write a TUI event on every live tick so the trade log always updates.
+                _bet_summary = bets.get_summary()
+                _append_tui_event({
+                    "type":  "TICK",
+                    "ticker": ticker,
+                    "pa":    player_a,
+                    "pb":    player_b,
+                    "score": _live_score_str,
+                    "prob_a": round(win_prob["team_a"], 3),
+                    "prob_b": round(win_prob["team_b"], 3),
+                    "nn":    round(nn_prob, 3) if nn_prob is not None else None,
+                    "xgb":   round(xgb_prob, 3) if xgb_prob is not None else None,
+                    "buys":  _bet_summary["total_buys"],
+                    "pnl":   round(_bet_summary["realized_pnl"], 2),
+                    "mode":  mode,
+                    "feed":  feed_status,
+                })
 
                 eval_start = time.time()
                 eval_latency = (eval_start - pipeline_start) * 1000
@@ -840,6 +887,23 @@ async def process_match(
                                 json.dump(adaptive.status_dict(), af)
                         except Exception:
                             pass
+
+                    # Write compact trade event for the TUI trade log.
+                    summary = bets.get_summary()
+                    _append_tui_event({
+                        "type":     "EVAL",
+                        "ticker":   ticker,
+                        "pa":       player_a,
+                        "pb":       player_b,
+                        "score":    _live_score_str,
+                        "prob_a":   round(win_prob["team_a"], 3),
+                        "prob_b":   round(win_prob["team_b"], 3),
+                        "nn":       round(nn_prob, 3) if nn_prob is not None else None,
+                        "xgb":      round(xgb_prob, 3) if xgb_prob is not None else None,
+                        "buys":     summary["total_buys"],
+                        "pnl":      round(summary["realized_pnl"], 2),
+                        "mode":     mode,
+                    })
                 except Exception as e:
                     log.error(f"Trading evaluation failed: {e}")
 

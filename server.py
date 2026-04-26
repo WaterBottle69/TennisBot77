@@ -203,13 +203,14 @@ async def start_bot():
     with open(log_path, "w") as f:
         pass
 
+    # --bot-only: web server is already running (us); starting another uvicorn
+    # on port 8000 would cause "address already in use" and fail silently.
     subprocess.Popen(
-        f"{sys.executable} {os.path.join(BASE_DIR, 'main.py')} > {log_path} 2>&1",
-        shell=True,
+        [sys.executable, os.path.join(BASE_DIR, "main.py"), "--bot-only"],
         env=env,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=open(log_path, "w"),
+        stderr=subprocess.STDOUT,
         close_fds=True,
         start_new_session=True,
         cwd=BASE_DIR,

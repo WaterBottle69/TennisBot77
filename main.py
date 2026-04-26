@@ -394,13 +394,13 @@ async def process_match(
         writer = csv.writer(_metrics_f)
 
         async for score_update in poll_live_score_real(player_a, player_b, config, interval=poll_interval):
+            pipeline_start = time.time()
             # Rotate metrics file when the calendar day rolls over
             _today = datetime.date.today().strftime("%Y%m%d")
             if _today != _metrics_day:
                 _metrics_f.close()
                 _metrics_f, _metrics_day = _open_metrics_file()
                 writer = csv.writer(_metrics_f)
-                pipeline_start = time.time()
 
             # ── Upcoming-match guard ─────────────────────────────────────────
             # While the match hasn't started yet, skip all trading logic so
@@ -1162,48 +1162,57 @@ async def run_game_session():
 
 
 if __name__ == "__main__":
+    import argparse
     import signal
     import uvicorn
 
-    async def _run_all():
-        """Run the trading bot and the web dashboard server concurrently."""
-        # Import the FastAPI app lazily so server.py's module-level code
-        # (which calls _setup_logging) only runs inside the event loop.
-        from server import app as _fastapi_app
+    _parser = argparse.ArgumentParser(add_help=False)
+    _parser.add_argument("--bot-only", action="store_true",
+                         help="Run only the bot engine (no web server). "
+                              "Used when the web server is already running.")
+    _args, _ = _parser.parse_known_args()
 
-        uv_config = uvicorn.Config(
-            _fastapi_app,
-            host="0.0.0.0",
-            port=8000,
-            log_level="warning",   # keep uvicorn quiet; bot uses its own logger
-            access_log=False,
-        )
-        uv_server = uvicorn.Server(uv_config)
-
-        # Run the web server and the bot engine as concurrent tasks.
-        bot_task = asyncio.create_task(run_game_session())
-        srv_task = asyncio.create_task(uv_server.serve())
+    async def _run_all(with_server: bool = True):
+        """Run the trading bot, and optionally the web dashboard server."""
 
         def _handle_shutdown(_signum=None, _frame=None):
             log.info("Received shutdown signal. Initiating graceful shutdown...")
             bot_task.cancel()
-            uv_server.should_exit = True
+            if with_server:
+                uv_server.should_exit = True
 
         loop = asyncio.get_running_loop()
         try:
             loop.add_signal_handler(signal.SIGTERM, _handle_shutdown)
             loop.add_signal_handler(signal.SIGINT,  _handle_shutdown)
         except (NotImplementedError, OSError):
-            pass  # Windows / unsupported platform
+            pass
+
+        bot_task = asyncio.create_task(run_game_session())
+
+        if with_server:
+            from server import app as _fastapi_app
+            uv_config = uvicorn.Config(
+                _fastapi_app,
+                host="0.0.0.0",
+                port=8000,
+                log_level="warning",
+                access_log=False,
+            )
+            uv_server = uvicorn.Server(uv_config)
+            srv_task = asyncio.create_task(uv_server.serve())
+            tasks = [bot_task, srv_task]
+        else:
+            tasks = [bot_task]
 
         try:
-            await asyncio.gather(bot_task, srv_task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             log.info("Bot successfully terminated with persistence intact.")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(_run_all())
+        loop.run_until_complete(_run_all(with_server=not _args.bot_only))
     except KeyboardInterrupt:
         pass

@@ -443,10 +443,8 @@ class TennisBotTUI(App):
         try:
             def _start():
                 log_path = os.path.join(BASE_DIR, "bot.log")
-                with open(log_path, "w") as f:
-                    pass
                 subprocess.Popen(
-                    [sys.executable, os.path.join(BASE_DIR, "main.py")],
+                    [sys.executable, os.path.join(BASE_DIR, "main.py"), "--bot-only"],
                     stdout=open(log_path, "w"),
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,

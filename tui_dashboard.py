@@ -11,11 +11,14 @@ import time
 from collections import deque
 from datetime import datetime
 
+import aiohttp
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Header, Footer, Static, Log, Sparkline
 from textual.widget import Widget
+
+API_BASE = "http://localhost:8000"
 
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 LIVE_STATE_PATH  = os.path.join(BASE_DIR, "live_state.json")
@@ -211,6 +214,9 @@ class TennisBotTUI(App):
         ("d", "toggle_dark", "Dark"),
         ("q", "quit", "Quit"),
         ("c", "clear_logs", "Clear Logs"),
+        ("s", "start_bot", "Start Bot"),
+        ("x", "stop_bot", "Stop Bot"),
+        ("h", "toggle_hf", "Toggle HF"),
     ]
 
     def compose(self) -> ComposeResult:
@@ -219,10 +225,10 @@ class TennisBotTUI(App):
             with Vertical(id="left_col"):
                 yield MatchPanel(id="match_panel")
                 yield ProbSparkline(id="spark_panel")
-                yield TradeLogPanel(id="tradelog", highlight=True, markup=True)
+                yield TradeLogPanel(id="tradelog", highlight=True)
             with Vertical(id="right_col"):
                 yield EnginePanel(id="engine_panel")
-                yield BotLogPanel(id="botlog", highlight=True, markup=True)
+                yield BotLogPanel(id="botlog", highlight=True)
         yield Footer()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
@@ -430,6 +436,52 @@ class TennisBotTUI(App):
     def action_clear_logs(self) -> None:
         self.query_one("#tradelog", TradeLogPanel).clear()
         self.query_one("#botlog",   BotLogPanel).clear()
+
+    async def action_start_bot(self) -> None:
+        botlog = self.query_one("#botlog", BotLogPanel)
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(f"{API_BASE}/api/start_bot") as r:
+                    if r.status == 200:
+                        botlog.write_line("[bold green][CMD] Bot started.[/bold green]")
+                    else:
+                        botlog.write_line(f"[red][CMD] start_bot failed: HTTP {r.status}[/red]")
+        except Exception as e:
+            botlog.write_line(f"[red][CMD] start_bot error: {e}[/red]")
+
+    async def action_stop_bot(self) -> None:
+        botlog = self.query_one("#botlog", BotLogPanel)
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(f"{API_BASE}/api/stop_bot") as r:
+                    if r.status == 200:
+                        botlog.write_line("[bold red][CMD] Bot stopped.[/bold red]")
+                    else:
+                        botlog.write_line(f"[red][CMD] stop_bot failed: HTTP {r.status}[/red]")
+        except Exception as e:
+            botlog.write_line(f"[red][CMD] stop_bot error: {e}[/red]")
+
+    async def action_toggle_hf(self) -> None:
+        botlog = self.query_one("#botlog", BotLogPanel)
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"{API_BASE}/api/get_trading_mode") as r:
+                    data = await r.json()
+                current = data.get("mode", "normal")
+                new_mode = "normal" if current == "hf" else "hf"
+                async with s.post(
+                    f"{API_BASE}/api/set_trading_mode",
+                    json={"mode": new_mode},
+                ) as r2:
+                    if r2.status == 200:
+                        color = "cyan" if new_mode == "hf" else "green"
+                        botlog.write_line(
+                            f"[bold {color}][CMD] Trading mode → {new_mode.upper()}[/bold {color}]"
+                        )
+                    else:
+                        botlog.write_line(f"[red][CMD] set_trading_mode failed: HTTP {r2.status}[/red]")
+        except Exception as e:
+            botlog.write_line(f"[red][CMD] toggle_hf error: {e}[/red]")
 
 
 if __name__ == "__main__":

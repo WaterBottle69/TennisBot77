@@ -1,0 +1,5 @@
+signal,col,roi_pct,sharpe,max_dd_pct,n_bets,p_value,coef
+9. Surface switch penalty,sig_surface_switch,165.043,-1.349,96.0,5109,0.423,1.2
+4. BP save rate diff,sig_bp_save,2.857,0.434,23.7,1730,0.0,2.9
+2. 2nd-serve won % diff,sig_second_won,2.239,-16021671102.592,2.6,60,0.0,3.0
+3. Ace rate diff,sig_ace_rate,-0.255,4.547,8.0,380,0.0,3.0

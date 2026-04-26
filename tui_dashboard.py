@@ -7,18 +7,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
 import time
 from collections import deque
 from datetime import datetime
 
-import aiohttp
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Header, Footer, Static, Log, Sparkline
 from textual.widget import Widget
 
-API_BASE = "http://localhost:8000"
+TRADING_MODE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading_mode.json")
 
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
 LIVE_STATE_PATH  = os.path.join(BASE_DIR, "live_state.json")
@@ -440,46 +441,49 @@ class TennisBotTUI(App):
     async def action_start_bot(self) -> None:
         botlog = self.query_one("#botlog", BotLogPanel)
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{API_BASE}/api/start_bot") as r:
-                    if r.status == 200:
-                        botlog.write_line("[bold green][CMD] Bot started.[/bold green]")
-                    else:
-                        botlog.write_line(f"[red][CMD] start_bot failed: HTTP {r.status}[/red]")
+            def _start():
+                log_path = os.path.join(BASE_DIR, "bot.log")
+                with open(log_path, "w") as f:
+                    pass
+                subprocess.Popen(
+                    [sys.executable, os.path.join(BASE_DIR, "main.py")],
+                    stdout=open(log_path, "w"),
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    cwd=BASE_DIR,
+                )
+            await asyncio.to_thread(_start)
+            botlog.write_line("[bold green][CMD] Bot started.[/bold green]")
         except Exception as e:
             botlog.write_line(f"[red][CMD] start_bot error: {e}[/red]")
 
     async def action_stop_bot(self) -> None:
         botlog = self.query_one("#botlog", BotLogPanel)
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{API_BASE}/api/stop_bot") as r:
-                    if r.status == 200:
-                        botlog.write_line("[bold red][CMD] Bot stopped.[/bold red]")
-                    else:
-                        botlog.write_line(f"[red][CMD] stop_bot failed: HTTP {r.status}[/red]")
+            def _stop():
+                subprocess.run(["pkill", "-f", "main.py"], capture_output=True)
+            await asyncio.to_thread(_stop)
+            botlog.write_line("[bold red][CMD] Bot stopped.[/bold red]")
         except Exception as e:
             botlog.write_line(f"[red][CMD] stop_bot error: {e}[/red]")
 
     async def action_toggle_hf(self) -> None:
         botlog = self.query_one("#botlog", BotLogPanel)
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(f"{API_BASE}/api/get_trading_mode") as r:
-                    data = await r.json()
-                current = data.get("mode", "normal")
+            def _toggle():
+                try:
+                    with open(TRADING_MODE_PATH, "r") as f:
+                        current = json.load(f).get("mode", "normal")
+                except Exception:
+                    current = "normal"
                 new_mode = "normal" if current == "hf" else "hf"
-                async with s.post(
-                    f"{API_BASE}/api/set_trading_mode",
-                    json={"mode": new_mode},
-                ) as r2:
-                    if r2.status == 200:
-                        color = "cyan" if new_mode == "hf" else "green"
-                        botlog.write_line(
-                            f"[bold {color}][CMD] Trading mode → {new_mode.upper()}[/bold {color}]"
-                        )
-                    else:
-                        botlog.write_line(f"[red][CMD] set_trading_mode failed: HTTP {r2.status}[/red]")
+                with open(TRADING_MODE_PATH, "w") as f:
+                    json.dump({"mode": new_mode}, f)
+                return new_mode
+            new_mode = await asyncio.to_thread(_toggle)
+            color = "cyan" if new_mode == "hf" else "green"
+            botlog.write_line(f"[bold {color}][CMD] Trading mode → {new_mode.upper()}[/bold {color}]")
         except Exception as e:
             botlog.write_line(f"[red][CMD] toggle_hf error: {e}[/red]")
 

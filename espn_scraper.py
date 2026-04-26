@@ -55,6 +55,7 @@ class ESPNTennisScorer:
     def __init__(self):
         self._cache: Dict[str, tuple] = {}   # url → (timestamp, parsed_list)
         self._session: aiohttp.ClientSession | None = None
+        self._locks: Dict[str, asyncio.Lock] = {url: asyncio.Lock() for url in _TOUR_URLS}
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -81,27 +82,30 @@ class ESPNTennisScorer:
         return merged
 
     async def _fetch_url(self, url: str) -> List[Dict]:
-        now = time.time()
         cached_ts, cached_data = self._cache.get(url, (0.0, []))
-        if now - cached_ts < _CACHE_TTL:
+        if time.time() - cached_ts < _CACHE_TTL:
             return cached_data
 
-        try:
-            session = self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200:
-                    log.warning("[ESPN] HTTP %s for %s", r.status, url)
-                    return cached_data
-                data = await r.json()
-            matches = self._parse(data)
-            self._cache[url] = (now, matches)
-            if matches:
-                log.info("[ESPN] %d live match(es) found", len(matches))
-            return matches
-        except Exception as exc:
-            log.warning("[ESPN] Fetch/parse failed (%s): %s", url, exc)
-            self._session = None
-            return cached_data
+        async with self._locks[url]:
+            cached_ts, cached_data = self._cache.get(url, (0.0, []))
+            if time.time() - cached_ts < _CACHE_TTL:
+                return cached_data
+            try:
+                session = self._get_session()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status != 200:
+                        log.warning("[ESPN] HTTP %s for %s", r.status, url)
+                        return cached_data
+                    data = await r.json()
+                matches = self._parse(data)
+                self._cache[url] = (time.time(), matches)
+                if matches:
+                    log.info("[ESPN] %d live match(es) found", len(matches))
+                return matches
+            except Exception as exc:
+                log.warning("[ESPN] Fetch/parse failed (%s): %s", url, exc)
+                self._session = None
+                return cached_data
 
     def _parse(self, data: dict) -> List[Dict]:
         result = []

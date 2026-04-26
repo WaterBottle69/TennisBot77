@@ -10,15 +10,15 @@ from flashscore_pipeline.discovery import FlashscoreDiscovery
 
 log = logging.getLogger(__name__)
 
-# Bypassing SSL for local dev / certifi issues on macOS
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
-# How long (seconds) a cached live-score response stays fresh.
-_LIVE_CACHE_TTL  = 25.0
-# Warn as stale if no fresh match data for this many seconds.
-_STALE_THRESHOLD = 60.0
+_LIVE_CACHE_TTL  = 20.0   # seconds a cached feed response stays fresh
+_STALE_THRESHOLD = 90.0   # seconds before trading is blocked as stale
+# After this many consecutive misses with no live data ever seen, give up and
+# release the worker slot so it isn't wasted on unsupported matches (e.g. Korean ITF).
+_GIVE_UP_MISSES  = 25
 
 
 class LiveScoreScraper:
@@ -44,9 +44,10 @@ class LiveScoreScraper:
 
         # Per-URL response cache: url → (timestamp, parsed_list)
         self._cache: Dict[str, Tuple[float, List[Dict]]] = {}
+        # Per-URL fetch lock — prevents cache stampede when many workers share this instance
+        self._locks: Dict[str, asyncio.Lock] = {}
         # Timestamp of the last response that contained at least one live match
         self._last_live_hit: float = 0.0
-        # Persistent session — created lazily, reused across all fetches (eliminates TLS overhead)
         self._session: Optional[aiohttp.ClientSession] = None
 
     def data_age_seconds(self) -> float:
@@ -84,29 +85,33 @@ class LiveScoreScraper:
 
     async def _fetch_url(self, url: str, include_scheduled: bool = False,
                          cache_ttl: float = _LIVE_CACHE_TTL) -> List[Dict]:
-        now = time.time()
         cached_ts, cached_data = self._cache.get(url, (0.0, []))
-        if now - cached_ts < cache_ttl:
-            log.debug("[LIVESCORE] cache hit for %s (age=%.1fs)", url, now - cached_ts)
+        if time.time() - cached_ts < cache_ttl:
             return cached_data
 
-        try:
-            session = self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    log.error(f"LiveScore API returned status {resp.status} for {url}")
-                    return cached_data  # return stale rather than empty on transient errors
-                data = await resp.json()
-                result = self._parse_api_response(data, include_scheduled=include_scheduled)
-                self._cache[url] = (now, result)
-                if result and not include_scheduled:
-                    self._last_live_hit = now
-                return result
-        except Exception as e:
-            log.error(f"Failed to fetch from LiveScore ({url}): {e}")
-            # Session may be broken — recreate on next call
-            self._session = None
-            return cached_data  # serve stale rather than crashing
+        if url not in self._locks:
+            self._locks[url] = asyncio.Lock()
+        async with self._locks[url]:
+            cached_ts, cached_data = self._cache.get(url, (0.0, []))
+            if time.time() - cached_ts < cache_ttl:
+                return cached_data
+            try:
+                session = self._get_session()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        log.warning("[LIVESCORE] HTTP %s for %s", resp.status, url)
+                        return cached_data
+                    data = await resp.json()
+                    result = self._parse_api_response(data, include_scheduled=include_scheduled)
+                    now = time.time()
+                    self._cache[url] = (now, result)
+                    if result and not include_scheduled:
+                        self._last_live_hit = now
+                    return result
+            except Exception as e:
+                log.warning("[LIVESCORE] Fetch failed (%s): %s", url, e)
+                self._session = None
+                return cached_data
 
     def _parse_api_response(self, data: Dict, include_scheduled: bool = False) -> List[Dict]:
         """Extract relevant match details from the JSON structure.
@@ -226,6 +231,17 @@ class LiveScoreScraper:
                 return match_rev
         return None
 
+# Module-level singleton — all workers share one session and one cache,
+# so 20+ concurrent workers make at most one HTTP request per TTL window.
+_shared_scraper: Optional[LiveScoreScraper] = None
+
+def _get_shared_scraper(config: Config) -> LiveScoreScraper:
+    global _shared_scraper
+    if _shared_scraper is None:
+        _shared_scraper = LiveScoreScraper(config)
+    return _shared_scraper
+
+
 async def poll_live_score_real(player_a: str, player_b: str, config: Config, interval: float = 10.0):
     """
     Indefinitely yields live-score updates for a match, using sources in
@@ -245,9 +261,10 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
     from sofascore_scraper import sofascore_scraper
     from sportradar_scraper import SportRadarLiveStream
 
-    scraper    = LiveScoreScraper(config)
+    scraper    = _get_shared_scraper(config)
     flashscore = FlashscoreDiscovery()
     consecutive_misses = 0
+    ever_seen_live = False
     _is_scheduled = False
 
     # ── 1. SportRadar WebSocket (priority 1) ─────────────────────────────────
@@ -325,9 +342,8 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
 
             if match:
                 consecutive_misses = 0
+                ever_seen_live = True
                 _is_scheduled = False
-                # Update live-hit timestamp regardless of which source provided the data,
-                # so data_age_seconds() stays fresh and STALE warnings don't fire falsely.
                 scraper._last_live_hit = time.time()
                 yield {
                     "points":        match["points"],
@@ -362,6 +378,18 @@ async def poll_live_score_real(player_a: str, player_b: str, config: Config, int
 
             consecutive_misses += 1
             data_age = scraper.data_age_seconds()
+
+            # Give up on matches that have never appeared on any scraper after
+            # _GIVE_UP_MISSES polls — these are likely ITF/minor events with no
+            # coverage. Releasing the slot frees workers for supported matches.
+            if not ever_seen_live and consecutive_misses >= _GIVE_UP_MISSES:
+                log.warning(
+                    "[LIVESCORE] UNSUPPORTED: %s vs %s never found on any scraper "
+                    "after %d polls — releasing worker slot.",
+                    player_a, player_b, consecutive_misses,
+                )
+                return
+
             if consecutive_misses >= 5 and data_age > _STALE_THRESHOLD:
                 log.warning(
                     "[LIVESCORE] STALE: no live data for %.0fs (%d misses) for "

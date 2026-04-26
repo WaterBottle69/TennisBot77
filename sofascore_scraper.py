@@ -7,6 +7,7 @@ Used as tertiary live-score source in poll_live_score_real
 """
 
 import aiohttp
+import asyncio
 import ssl
 import time
 import logging
@@ -54,6 +55,7 @@ class SofaScoreScraper:
         self._cache_ts: float = 0.0
         self._cache_data: List[Dict] = []
         self._session: Optional[aiohttp.ClientSession] = None
+        self._lock = asyncio.Lock()
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -72,24 +74,28 @@ class SofaScoreScraper:
         if now - self._cache_ts < _CACHE_TTL:
             return self._cache_data
 
-        try:
-            session = self._get_session()
-            async with session.get(_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200:
-                    log.warning("[SOFASCORE] HTTP %s", r.status)
-                    return self._cache_data
-                data = await r.json()
-        except Exception as exc:
-            log.warning("[SOFASCORE] Fetch failed: %s", exc)
-            self._session = None
-            return self._cache_data
+        async with self._lock:
+            # Re-check after acquiring lock — another worker may have just fetched
+            if time.time() - self._cache_ts < _CACHE_TTL:
+                return self._cache_data
+            try:
+                session = self._get_session()
+                async with session.get(_URL, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status != 200:
+                        log.warning("[SOFASCORE] HTTP %s", r.status)
+                        return self._cache_data
+                    data = await r.json()
+            except Exception as exc:
+                log.warning("[SOFASCORE] Fetch failed: %s", exc)
+                self._session = None
+                return self._cache_data
 
-        matches = self._parse(data)
-        self._cache_ts = now
-        self._cache_data = matches
-        if matches:
-            log.info("[SOFASCORE] %d live singles match(es)", len(matches))
-        return matches
+            matches = self._parse(data)
+            self._cache_ts = time.time()
+            self._cache_data = matches
+            if matches:
+                log.info("[SOFASCORE] %d live singles match(es)", len(matches))
+            return matches
 
     def _parse(self, data: dict) -> List[Dict]:
         result = []

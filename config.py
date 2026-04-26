@@ -35,10 +35,8 @@ def normalize_kalshi_pem(pem: str) -> str:
         return f"{begin}\n{wrapped}\n{end}"
 
     if "-----BEGIN" not in pem:
-        # Standardize Base64 (remove potential whitespace/newlines/junk)
         clean = re.sub(r"\s+", "", pem)
         wrapped = "\n".join(textwrap.wrap(clean, 64))
-        # Default to RSA Private Key header as it's most common for Kalshi's .pem files
         return f"-----BEGIN RSA PRIVATE KEY-----\n{wrapped}\n-----END RSA PRIVATE KEY-----"
     
     return pem

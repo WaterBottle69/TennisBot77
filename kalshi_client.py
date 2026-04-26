@@ -839,7 +839,10 @@ class KalshiClient:
                         "KALSHI-ACCESS-SIGNATURE": signature,
                     }
                     
-                async with websockets.connect(ws_base, additional_headers=headers, ping_interval=20, ping_timeout=10) as ws:
+                _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+                async with websockets.connect(ws_base, additional_headers=headers,
+                                              ssl=_ssl_ctx,
+                                              ping_interval=20, ping_timeout=10) as ws:
                     log.info(f"[WS] Connected to orderbook stream for {ticker}")
                     backoff = 1.0
                     await ws.send(subscribe_msg)
@@ -888,7 +891,9 @@ class KalshiClient:
                     "KALSHI-ACCESS-TIMESTAMP": timestamp,
                     "KALSHI-ACCESS-SIGNATURE": signature,
                 }
+                _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
                 async with websockets.connect(ws_base, additional_headers=headers,
+                                              ssl=_ssl_ctx,
                                               ping_interval=20, ping_timeout=10) as ws:
                     log.info("[WS] Connected to user_fills stream")
                     backoff = 1.0

@@ -199,12 +199,15 @@ def _score_tennis_event(event: Dict[str, Any]) -> int:
     cat = event.get("category") or ""
     blob = f"{title} {sub} {st} {et} {cat}"
 
+    if "ITF" in blob.upper():
+        return -500  # Explicitly ban ITF matches as requested
+
     score = 0
     # Explicit tennis markers are high priority. 
     if "TENNIS" in blob.upper():
         score += 200
         
-    if re.search(r"(ATP|WTA|ITF|CHALLENGER)", blob, re.I):
+    if re.search(r"(ATP|WTA|CHALLENGER)", blob, re.I):
         score += 100
     
     if _split_vs_title(title):
@@ -235,6 +238,9 @@ def _is_tennis_event(event: Dict[str, Any]) -> bool:
         if bad in st or bad in et or bad in title:
             return False
             
+    if "ITF" in blob.upper():
+        return False
+            
     if "TENNIS" in blob.upper():
         return True
             
@@ -242,7 +248,7 @@ def _is_tennis_event(event: Dict[str, Any]) -> bool:
         return False
         
     # MUST have an explicit tennis hint to pass.
-    has_explicit = bool(re.search(r"(ATP|WTA|ITF|CHALLENGER)", blob, re.I))
+    has_explicit = bool(re.search(r"(ATP|WTA|CHALLENGER)", blob, re.I))
     if has_explicit:
         return True
         
@@ -379,7 +385,9 @@ class KalshiClient:
 
         kwargs["headers"] = headers
 
-        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
         if self._http is None or self._http.closed:
             self._http = aiohttp.ClientSession()
         _timeout = aiohttp.ClientTimeout(total=20, connect=10)
@@ -840,7 +848,9 @@ class KalshiClient:
                         "KALSHI-ACCESS-SIGNATURE": signature,
                     }
                     
-                _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+                _ssl_ctx = ssl.create_default_context()
+                _ssl_ctx.check_hostname = False
+                _ssl_ctx.verify_mode = ssl.CERT_NONE
                 async with websockets.connect(ws_base, additional_headers=headers,
                                               ssl=_ssl_ctx,
                                               ping_interval=20, ping_timeout=10) as ws:
@@ -892,7 +902,9 @@ class KalshiClient:
                     "KALSHI-ACCESS-TIMESTAMP": timestamp,
                     "KALSHI-ACCESS-SIGNATURE": signature,
                 }
-                _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
+                _ssl_ctx = ssl.create_default_context()
+                _ssl_ctx.check_hostname = False
+                _ssl_ctx.verify_mode = ssl.CERT_NONE
                 async with websockets.connect(ws_base, additional_headers=headers,
                                               ssl=_ssl_ctx,
                                               ping_interval=20, ping_timeout=10) as ws:

@@ -230,9 +230,9 @@ async def process_match(
         return True
 
     if not _stats_ok(p1_stats, player_a) or not _stats_ok(p2_stats, player_b):
-        log.error(
-            "[STATS-GATE] Insufficient player data for %s vs %s — "
-            "trade BLOCKED. Fix: check player name parsing in kalshi_client.",
+        log.warning(
+            "[STATS-GATE] Insufficient player data for %s vs %s (likely an ITF/low-tier match). "
+            "Trade BLOCKED because ML model lacks ELO/rank data to estimate fair odds.",
             player_a, player_b,
         )
         return

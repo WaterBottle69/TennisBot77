@@ -196,12 +196,15 @@ def _score_tennis_event(event: Dict[str, Any]) -> int:
             return -1
 
     sub = event.get("sub_title") or ""
-    blob = f"{title} {sub} {st} {et}"
+    cat = event.get("category") or ""
+    blob = f"{title} {sub} {st} {et} {cat}"
 
     score = 0
     # Explicit tennis markers are high priority. 
-    # Use loose matching for tickers (ATP/WTA/ITF/CHALLENGER/TENNIS)
-    if re.search(r"(ATP|WTA|ITF|CHALLENGER|TENNIS)", blob, re.I):
+    if "TENNIS" in blob.upper():
+        score += 200
+        
+    if re.search(r"(ATP|WTA|ITF|CHALLENGER)", blob, re.I):
         score += 100
     
     if _split_vs_title(title):
@@ -210,10 +213,10 @@ def _score_tennis_event(event: Dict[str, Any]) -> int:
     if _TENNIS_HINTS.search(blob):
         score += 70
         
-    if (event.get("category") or "").lower() == "sports":
+    if cat.lower() == "sports":
         score += 10
         
-    if _NON_TENNIS_HINTS.search(blob):
+    if _NON_TENNIS_HINTS.search(blob) and "TENNIS" not in blob.upper():
         score -= 200  # Heavy penalty for non-tennis hints
         
     return score
@@ -224,25 +227,23 @@ def _is_tennis_event(event: Dict[str, Any]) -> bool:
     et = (event.get("event_ticker") or "").upper()
     title = (event.get("title") or "").upper()
     sub = event.get("sub_title") or ""
-    blob = f"{title} {sub} {st} {et}"
+    cat = event.get("category") or ""
+    blob = f"{title} {sub} {st} {et} {cat}"
 
     # Strict exclusion check
     for bad in _EXCLUDE_SERIES_SUBSTR:
         if bad in st or bad in et or bad in title:
             return False
             
+    if "TENNIS" in blob.upper():
+        return True
+            
     if _NON_TENNIS_HINTS.search(blob):
         return False
         
     # MUST have an explicit tennis hint to pass.
-    # We prioritize ATP/WTA/ITF/CHALLENGER/TENNIS as explicit markers.
-    # Note: We don't use \b here because Kalshi often joins them (e.g. KXATPCHALLENGERMATCH)
-    has_explicit = bool(re.search(r"(ATP|WTA|ITF|CHALLENGER|TENNIS)", blob, re.I))
+    has_explicit = bool(re.search(r"(ATP|WTA|ITF|CHALLENGER)", blob, re.I))
     if has_explicit:
-        return True
-        
-    # Fallback to broader hints only if "Tennis" is in the title or it's clearly a matchup
-    if "TENNIS" in blob.upper():
         return True
         
     return bool(_TENNIS_HINTS.search(blob))
@@ -469,7 +470,7 @@ class KalshiClient:
             direct_events.extend(batch)
 
         # ── Fallback: paginated general scan ───────────────────────────────────
-        max_pages = getattr(self.cfg, "KALSHI_EVENTS_MAX_PAGES", 5)
+        max_pages = getattr(self.cfg, "KALSHI_EVENTS_MAX_PAGES", 100)
         paged_events: List[Dict] = []
         cursor = ""
         for page in range(max_pages):

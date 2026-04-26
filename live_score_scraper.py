@@ -189,38 +189,41 @@ class LiveScoreScraper:
 
     def find_match(self, player_a: str, player_b: str, matches: List[Dict]) -> Optional[Dict]:
         """
-        Token-based fuzzy matching. Handles name variations like:
-        - "Sho Shimabukuro" vs "S. Shimabukuro"
-        - "Ui-Sung Park" vs "Park, U"
-        - "Carlos Alcaraz" vs "Alcaraz Garfia, C"
+        Token-based fuzzy matching. Handles name variations and prevents sibling mismatches.
         """
         import re
         def get_tokens(name):
-            # Remove punctuation and split into lowercase alphanumeric tokens
             clean = re.sub(r'[^a-zA-Z0-9\s]', '', name.lower())
-            return set(t for t in clean.split() if len(t) > 1 or t.isdigit())
+            return set(clean.split())
 
         k_a_tokens = get_tokens(player_a)
         k_b_tokens = get_tokens(player_b)
+
+        def is_match(k_toks, m_toks):
+            overlap = k_toks.intersection(m_toks)
+            # Require at least one token >= 3 chars (usually the last name)
+            # or if the name is very short (e.g. "Wu"), just require any overlap
+            has_strong_overlap = any(len(t) >= 2 for t in overlap)
+            if not has_strong_overlap:
+                return False
+                
+            # If initials conflict strictly, reject to prevent sibling mismatches
+            k_inits = {t[0] for t in k_toks if len(t) == 1}
+            m_inits = {t[0] for t in m_toks if len(t) == 1}
+            if k_inits and m_inits and not k_inits.intersection(m_inits):
+                # E.g. k="M Ymer" (m), m="E Ymer" (e) -> fail
+                return False
+                
+            return True
 
         for m in matches:
             m_a_tokens = get_tokens(m["player_a"])
             m_b_tokens = get_tokens(m["player_b"])
 
-            # Check for name intersection. If the last names match and initials match, it's likely the same.
-            # We look for at least one overlapping token per player.
-            a_match = bool(k_a_tokens.intersection(m_a_tokens))
-            b_match = bool(k_b_tokens.intersection(m_b_tokens))
-            
-            # Check direct match
-            if a_match and b_match:
+            if is_match(k_a_tokens, m_a_tokens) and is_match(k_b_tokens, m_b_tokens):
                 return m
             
-            # Check reverse match (Kalshi/LiveScore swapping positions)
-            a_rev_match = bool(k_a_tokens.intersection(m_b_tokens))
-            b_rev_match = bool(k_b_tokens.intersection(m_a_tokens))
-            
-            if a_rev_match and b_rev_match:
+            if is_match(k_a_tokens, m_b_tokens) and is_match(k_b_tokens, m_a_tokens):
                 match_rev = m.copy()
                 match_rev["player_a"], match_rev["player_b"] = m["player_b"], m["player_a"]
                 match_rev["sets"] = (m["sets"][1], m["sets"][0])

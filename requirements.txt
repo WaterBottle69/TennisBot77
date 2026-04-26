@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-opencv-python
 beautifulsoup4
 aiohttp
 python-multipart

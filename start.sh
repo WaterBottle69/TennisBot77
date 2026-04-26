@@ -7,13 +7,35 @@
 set -e
 cd "$(dirname "$0")"
 
-VENV_PY="./venv/bin/python"
-if [ ! -f "$VENV_PY" ]; then
-    echo "[start.sh] venv not found — creating it..."
-    python3 -m venv venv
+# ── Find Python 3.9+ ──────────────────────────────────────────────────────────
+PYTHON=""
+for candidate in python3 python3.12 python3.11 python3.10 python3.9 python; do
+    if command -v "$candidate" &>/dev/null; then
+        ver=$("$candidate" -c "import sys; print(sys.version_info >= (3,9))" 2>/dev/null)
+        if [ "$ver" = "True" ]; then
+            PYTHON="$candidate"
+            break
+        fi
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "[start.sh] ERROR: Python 3.9+ not found. Install it first:"
+    echo "  macOS:  brew install python@3.11"
+    echo "  Debian/Ubuntu: sudo apt install python3.11 python3.11-venv"
+    exit 1
 fi
 
-# Ensure all deps are installed (fast no-op if already satisfied)
+# ── Create venv if missing ────────────────────────────────────────────────────
+VENV_PY="./venv/bin/python"
+if [ ! -f "$VENV_PY" ]; then
+    echo "[start.sh] Creating virtual environment..."
+    "$PYTHON" -m venv venv
+fi
+
+# ── Install / update dependencies ────────────────────────────────────────────
+echo "[start.sh] Checking dependencies..."
+"$VENV_PY" -m pip install -q --upgrade pip
 "$VENV_PY" -m pip install -q -r requirements.txt
 
 echo "[start.sh] Starting TennisBot77 engine + web server..."
@@ -24,11 +46,11 @@ if [ "$1" = "tui" ]; then
     # Start the bot+server in background, launch TUI in foreground
     "$VENV_PY" main.py &
     BOT_PID=$!
-    echo "[start.sh] Bot PID: $BOT_PID — waiting 3s for startup..."
-    sleep 3
-    trap "kill $BOT_PID 2>/dev/null" EXIT
+    echo "[start.sh] Bot PID: $BOT_PID — waiting 4s for startup..."
+    sleep 4
+    trap "kill $BOT_PID 2>/dev/null; exit" EXIT INT TERM
     "$VENV_PY" tui_dashboard.py
 else
-    # Run everything in foreground (bot starts web server internally)
+    # Run everything in foreground (main.py starts uvicorn internally)
     exec "$VENV_PY" main.py
 fi

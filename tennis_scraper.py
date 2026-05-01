@@ -409,8 +409,13 @@ class TennisStatsScraper:
         rankings = await self.fetch_rankings()
         slug = self._resolve_slug(player_name, rankings)
 
-        if slug:
-            base = rankings.get(slug, {}).copy()
+        # Only enrich players who are actually present in the rankings cache.
+        # _resolve_slug always returns a non-None slug (falls back to name-derived
+        # slug), so `if slug:` was always True — we would call fetch_player_profile
+        # for any name, risking a partial/wrong profile being returned.
+        # Guard with `slug in rankings` to ensure we have a verified identity.
+        if slug and slug in rankings:
+            base = rankings[slug].copy()
             # Enrich with detailed profile page
             profile = await self.fetch_player_profile(slug)
             base.update({k: v for k, v in profile.items() if v is not None})
@@ -423,6 +428,7 @@ class TennisStatsScraper:
         log.warning("Player '%s' not found on tennisstats.com – using generic profile", player_name)
         return {
             "slug":          _name_to_slug(player_name),
+            "data_quality":  "low",
             "ranking":       100,
             "elo":           0,        # 0 signals "unknown" — prevents false pts_vs_rank edge
             "win_rate":      0.50,

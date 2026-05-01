@@ -154,6 +154,13 @@ class Config:
     # No minimum edge — Kelly formula naturally returns 0 when there is no edge.
     MIN_EDGE: float              = 0.0
 
+    # Ranking threshold gate: block any match where BOTH players are ranked
+    # below this number. The XGBoost model was trained primarily on ATP top-200
+    # data — its differential signal for rank-400+ Challenger players is
+    # extrapolation, not learned pattern. Kalshi prices at this level reflect
+    # real form data the model simply cannot see. Set to 0 to disable.
+    MIN_PLAYER_RANK_THRESHOLD: int = 200
+
     # Alpha surface ROI gate disabled — no trade history yet to build surface from.
     MIN_ROI_THRESHOLD: float     = -1.0
 

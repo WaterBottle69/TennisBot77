@@ -215,8 +215,7 @@ async def process_match(
         slug = stats.get("slug", "")
         elo  = stats.get("elo",  0)
         rank = stats.get("ranking", 0)
-        # Reject if: no slug, slug looks like a Kalshi title fragment ("set-2"),
-        # or both elo and ranking are at their defaults (0 / None).
+
         if not slug:
             log.warning("[STATS-GATE] %s: no slug — aborting match.", label)
             return False
@@ -227,6 +226,27 @@ async def process_match(
         if not elo and not rank:
             log.warning("[STATS-GATE] %s: no ELO and no ranking — aborting match.", label)
             return False
+        # Explicit generic-fallback check: tennis_scraper returns elo=500,
+        # ranking=100 when the player is not found on tennisstats.com.
+        # These non-zero values fool the check above, but the data is useless —
+        # the model outputs ~50/50, creating false edge against a priced favourite.
+        # data_quality=="low" is the canonical flag; the numeric sentinel is a
+        # second-layer safety net in case the flag was not set.
+        if stats.get("data_quality") == "low":
+            log.warning(
+                "[STATS-GATE] %s: data_quality=low (player not found on tennisstats.com) — aborting.",
+                label,
+            )
+            return False
+        _FALLBACK_ELO  = 500
+        _FALLBACK_RANK = 100
+        if int(elo) == _FALLBACK_ELO and int(rank) == _FALLBACK_RANK:
+            log.warning(
+                "[STATS-GATE] %s: stats match generic fallback sentinel (elo=%s rank=%s) — "
+                "player likely not found. Aborting to prevent false-edge bets.",
+                label, elo, rank,
+            )
+            return False
         return True
 
     if not _stats_ok(p1_stats, player_a) or not _stats_ok(p2_stats, player_b):
@@ -236,6 +256,32 @@ async def process_match(
             player_a, player_b,
         )
         return
+
+    # Ranking threshold gate: block matches where BOTH players rank below the
+    # configured threshold. The model was trained on top-200 ATP data; its signal
+    # for rank-300+ Challenger players is unreliable extrapolation. Kalshi's
+    # market at this level reflects real local form data the model cannot see,
+    # creating phantom edge that has caused catastrophic losses (Burruchaga vs
+    # Pellegrino, Piros vs Gentzsch, Smith vs Matsuoka).
+    _rank_threshold = getattr(config, "MIN_PLAYER_RANK_THRESHOLD", 200)
+    if _rank_threshold > 0:
+        _r1 = int(p1_stats.get("ranking", 999))
+        _r2 = int(p2_stats.get("ranking", 999))
+        if _r1 > _rank_threshold and _r2 > _rank_threshold:
+            log.warning(
+                "[RANK-GATE] %s (rank=%d) vs %s (rank=%d) — both below top-%d. "
+                "Model has no reliable signal at this level. Trade BLOCKED.",
+                player_a, _r1, player_b, _r2, _rank_threshold,
+            )
+            return
+        if _r1 > _rank_threshold or _r2 > _rank_threshold:
+            _low = player_a if _r1 > _rank_threshold else player_b
+            _low_rank = _r1 if _r1 > _rank_threshold else _r2
+            log.info(
+                "[RANK-GATE] %s rank=%d is below threshold %d — Kelly will be "
+                "capped at 5%% for this match.",
+                _low, _low_rank, _rank_threshold,
+            )
 
     # BUG FIX: Infer surface from tournament name BEFORE ML inference.
     # Previously hardcoded to 'Hard', causing wrong XGBoost surface features
@@ -753,6 +799,10 @@ async def process_match(
                     market = _market_raw
                     market["player_a"] = player_a
                     market["player_b"] = player_b
+                    # Expose player profiles so bet_manager's data-quality gate can
+                    # block trades when either player's stats are a generic fallback.
+                    market["p1_stats"] = p1_stats
+                    market["p2_stats"] = p2_stats
 
                 flow_data = {
                     "direction":  flow_sig.direction.value if flow_sig else "NEUTRAL",
@@ -794,6 +844,13 @@ async def process_match(
                 eval_start = time.time()
                 eval_latency = (eval_start - pipeline_start) * 1000
                 kelly_mult = adaptive.kelly_multiplier if adaptive else 1.0
+                # If one player is below the ranking threshold, cap Kelly at 5%
+                # regardless of perceived edge — model signal is unreliable here.
+                if _rank_threshold > 0:
+                    _r1_live = int(p1_stats.get("ranking", 999))
+                    _r2_live = int(p2_stats.get("ranking", 999))
+                    if _r1_live > _rank_threshold or _r2_live > _rank_threshold:
+                        kelly_mult = min(kelly_mult, 0.05)
 
                 # Determine live/stale status FIRST — must be done before any order logic.
                 market_is_active = market.get("active", True)

@@ -79,7 +79,7 @@ class TennisStatsScraper:
     _PROFILE_TTL  = 86400.0   # re-fetch player profiles at most once per day
 
     def __init__(self):
-        self._rankings: dict | None = None   # slug → data dict, populated lazily
+        self._rankings = None   # type: dict | None  # slug → data dict, populated lazily
         self._rankings_fetched_at: float = 0.0
         self._profile_cache: dict = {}       # slug → profile dict
         self._profile_cache_ts: dict = {}    # slug → fetch timestamp
@@ -101,17 +101,74 @@ class TennisStatsScraper:
             self._session = None
 
     async def _get(self, url: str):
-        """Fetch a URL and return its HTML, or None on failure."""
+        """Fetch a URL and return its HTML, or None on failure.
+
+        Fast path: aiohttp (no overhead, milliseconds).
+        Fallback: Playwright headless Chromium when the fast path gets a
+        non-200 (e.g. Cloudflare Managed Challenge on tennisstats.com).
+        Playwright executes the JS challenge and returns the real page HTML.
+        The browser process lives only for this single fetch then closes.
+        """
+        # ── Fast path ────────────────────────────────────────────────────
         try:
             session = self._get_session()
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 if r.status == 200:
                     return await r.text()
-                log.warning("HTTP %s for %s", r.status, url)
+                log.warning("HTTP %s for %s — trying Playwright fallback", r.status, url)
         except Exception as exc:
-            log.error("Fetch failed for %s: %s", url, exc)
-            self._session = None  # recreate on next call
-        return None
+            log.warning("aiohttp failed for %s (%s) — trying Playwright fallback", url, exc)
+            self._session = None
+
+        # ── Playwright fallback ──────────────────────────────────────────
+        return await self._get_via_playwright(url)
+
+    async def _get_via_playwright(self, url: str):
+        """Headless Chromium fetch that passes Cloudflare JS challenges."""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            log.error("playwright not installed — run: pip install playwright && python -m playwright install chromium")
+            return None
+
+        try:
+            log.info("[PLAYWRIGHT] Launching Chromium for %s", url)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True)
+                ctx = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    locale="en-US",
+                )
+                page = await ctx.new_page()
+                # Use "domcontentloaded" — networkidle times out because
+                # Cloudflare's challenge JS keeps pinging challenges.cloudflare.com.
+                # Instead we wait for a real page element to confirm the challenge
+                # was solved and the rankings content loaded.
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                try:
+                    # Wait for a player profile link — only present on the real page
+                    await page.wait_for_selector("a[href^='/players/']", timeout=20_000)
+                except Exception:
+                    pass  # fall through to content check below
+                html = await page.content()
+                await browser.close()
+
+            # If Cloudflare challenge wasn't solved (rare), the page still
+            # contains "Just a moment" — treat it as a failure.
+            if "Just a moment" in html or "cf-mitigated" in html:
+                log.warning("[PLAYWRIGHT] Cloudflare challenge not resolved for %s", url)
+                return None
+
+            log.info("[PLAYWRIGHT] Successfully fetched %s via Chromium", url)
+            return html
+
+        except Exception as exc:
+            log.error("[PLAYWRIGHT] Failed for %s: %s", url, exc)
+            return None
 
     # ------------------------------------------------------------------
     # Rankings

@@ -351,5 +351,23 @@ class HybridMLEngine:
 
         return result
 
+    def record_trade_outcome(self, trade_data: dict):
+        """
+        Appends every resolved bet to bad_trades.jsonl.
+        Trades where pnl < 0 and the claimed edge was >10pp get flagged_bad: true.
+        """
+        pnl = trade_data.get('pnl', 0.0)
+        edge = trade_data.get('edge', 0.0)
+        
+        # Claimed edge was >10pp
+        trade_data['flagged_bad'] = bool(pnl < 0 and edge > 0.10)
+        
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        out_path = os.path.join(base_dir, 'bad_trades.jsonl')
+        try:
+            with open(out_path, 'a') as f:
+                f.write(json.dumps(trade_data) + '\n')
+        except Exception as e:
+            log.error(f"Failed to record trade outcome to bad_trades.jsonl: {e}")
 
 ml_engine = HybridMLEngine()

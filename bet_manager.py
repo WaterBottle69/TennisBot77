@@ -14,6 +14,7 @@ from config import Config
 from market_monitor import MarketMonitor, MarketSignal, FlowDirection
 from adaptive_controller import AdaptiveController
 from trade_tracker import TradeTracker
+from ml_engine import ml_engine
 
 import numpy as np
 import pandas as pd
@@ -258,6 +259,12 @@ class BetManager:
             log.info("Market inactive — skipping.")
             return
             
+        p_a_quality = win_prob.get("player_stats_a", {}).get("data_quality", "high")
+        p_b_quality = win_prob.get("player_stats_b", {}).get("data_quality", "high")
+        if p_a_quality == "low" or p_b_quality == "low":
+            log.warning(f"[DATA GATE] Low data quality detected for player(s) (A:{p_a_quality}, B:{p_b_quality}). Blocking trade.")
+            return
+
         injury_flag = event.get("injury_flag", False)
         if injury_flag:
             log.warning(f"🚨 MEDICAL TIMEOUT / INJURY FLAG DETECTED for {market.get('id')}. Halting Limit Orders.")
@@ -1146,6 +1153,7 @@ class BetManager:
             "model_p": pos["model_prob"], "market_p": pos["entry_price"],
             **pos, "resp": resp
         })
+        ml_engine.record_trade_outcome(self._trade_log[-1])
         if self.tracker is not None:
             _tid = pos.get("trade_id")
             if _tid:

@@ -78,12 +78,17 @@ class TennisStatsScraper:
     _RANKINGS_TTL = 3600.0    # re-fetch rankings at most once per hour
     _PROFILE_TTL  = 86400.0   # re-fetch player profiles at most once per day
 
-    def __init__(self):
+    def __init__(self, flaresolverr_url: str = ""):
         self._rankings = None   # type: dict | None  # slug → data dict, populated lazily
         self._rankings_fetched_at: float = 0.0
         self._profile_cache: dict = {}       # slug → profile dict
         self._profile_cache_ts: dict = {}    # slug → fetch timestamp
         self._session: aiohttp.ClientSession | None = None
+        import os
+        self._flaresolverr_url = (
+            flaresolverr_url
+            or os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -103,28 +108,95 @@ class TennisStatsScraper:
     async def _get(self, url: str):
         """Fetch a URL and return its HTML, or None on failure.
 
-        Fast path: aiohttp (no overhead, milliseconds).
-        Fallback: Playwright headless Chromium when the fast path gets a
-        non-200 (e.g. Cloudflare Managed Challenge on tennisstats.com).
-        Playwright executes the JS challenge and returns the real page HTML.
-        The browser process lives only for this single fetch then closes.
+        Tier 1: aiohttp (fast, no overhead).
+        Tier 2: FlareSolverr (bypasses Cloudflare Managed Challenge via real Chrome).
+        Tier 3: Playwright headless Chromium (last resort, often blocked by CF).
+
+        FlareSolverr must be running locally — start it with:
+          docker run -d --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
         """
-        # ── Fast path ────────────────────────────────────────────────────
+        # ── Tier 1: fast path ────────────────────────────────────────────
         try:
             session = self._get_session()
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
                 if r.status == 200:
                     return await r.text()
-                log.warning("HTTP %s for %s — trying Playwright fallback", r.status, url)
+                log.warning("HTTP %s for %s — trying FlareSolverr", r.status, url)
         except Exception as exc:
-            log.warning("aiohttp failed for %s (%s) — trying Playwright fallback", url, exc)
+            log.warning("aiohttp failed for %s (%s) — trying FlareSolverr", url, exc)
             self._session = None
 
-        # ── Playwright fallback ──────────────────────────────────────────
+        # ── Tier 2: FlareSolverr ─────────────────────────────────────────
+        html = await self._get_via_flaresolverr(url)
+        if html:
+            return html
+
+        # ── Tier 3: Playwright (last resort) ─────────────────────────────
+        log.warning("FlareSolverr unavailable for %s — falling back to Playwright", url)
         return await self._get_via_playwright(url)
 
+    async def _get_via_flaresolverr(self, url: str):
+        """
+        Route the request through a local FlareSolverr instance.
+
+        FlareSolverr launches a real Chrome browser that can solve Cloudflare
+        Managed Challenge — the same challenge that blocks aiohttp, curl_cffi,
+        and headless Playwright.
+
+        Start FlareSolverr (one-time Docker command):
+          docker run -d --name flaresolverr -p 8191:8191 \\
+            ghcr.io/flaresolverr/flaresolverr:latest
+
+        If FlareSolverr is not running the call will fail immediately (connection
+        refused) and we fall through to the Playwright tier.
+        """
+        fs_url = self._flaresolverr_url
+
+        payload = {
+            "cmd": "request.get",
+            "url": url,
+            "maxTimeout": 60000,
+        }
+
+        try:
+            # Use a bare ClientSession (no custom SSL / headers) for the local API call
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    fs_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=75),  # slightly above maxTimeout
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning("[FLARESOLVERR] HTTP %s from %s", resp.status, fs_url)
+                        return None
+                    data = await resp.json()
+
+            solution = data.get("solution", {})
+            status   = solution.get("status", 0)
+            html     = solution.get("response", "")
+
+            if status != 200 or not html:
+                log.warning("[FLARESOLVERR] Non-200 solution status=%s for %s", status, url)
+                return None
+
+            # Sanity-check: if Cloudflare's JS challenge page slipped through
+            if "Just a moment" in html and "cf-mitigated" in html:
+                log.warning("[FLARESOLVERR] Challenge page returned for %s", url)
+                return None
+
+            log.info("[FLARESOLVERR] Successfully fetched %s", url)
+            return html
+
+        except aiohttp.ClientConnectorError:
+            # FlareSolverr is not running — silent fallthrough to Playwright
+            log.info("[FLARESOLVERR] Not running at %s — skipping", fs_url)
+            return None
+        except Exception as exc:
+            log.warning("[FLARESOLVERR] Error for %s: %s", url, exc)
+            return None
+
     async def _get_via_playwright(self, url: str):
-        """Headless Chromium fetch that passes Cloudflare JS challenges."""
+        """Headless Chromium fetch (last resort — often blocked by Cloudflare Managed Challenge)."""
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -144,21 +216,14 @@ class TennisStatsScraper:
                     locale="en-US",
                 )
                 page = await ctx.new_page()
-                # Use "domcontentloaded" — networkidle times out because
-                # Cloudflare's challenge JS keeps pinging challenges.cloudflare.com.
-                # Instead we wait for a real page element to confirm the challenge
-                # was solved and the rankings content loaded.
                 await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 try:
-                    # Wait for a player profile link — only present on the real page
                     await page.wait_for_selector("a[href^='/players/']", timeout=20_000)
                 except Exception:
-                    pass  # fall through to content check below
+                    pass
                 html = await page.content()
                 await browser.close()
 
-            # If Cloudflare challenge wasn't solved (rare), the page still
-            # contains "Just a moment" — treat it as a failure.
             if "Just a moment" in html or "cf-mitigated" in html:
                 log.warning("[PLAYWRIGHT] Cloudflare challenge not resolved for %s", url)
                 return None

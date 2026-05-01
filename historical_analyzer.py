@@ -18,7 +18,9 @@ log = logging.getLogger(__name__)
 class HistoricalAnalyzer:
     def __init__(self, config: Config):
         self.cfg = config
-        self._scraper = TennisStatsScraper()
+        self._scraper = TennisStatsScraper(
+            flaresolverr_url=getattr(config, "FLARESOLVERR_URL", "")
+        )
 
     async def close(self):
         await self._scraper.close()

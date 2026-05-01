@@ -55,6 +55,32 @@ if "$VENV_PY" -c "import playwright" 2>/dev/null; then
     fi
 fi
 
+# ── FlareSolverr: Cloudflare bypass for tennisstats.com ──────────────────────
+# tennisstats.com is protected by Cloudflare Managed Challenge, which blocks all
+# programmatic HTTP clients (aiohttp, curl, headless browsers). FlareSolverr is a
+# self-hosted Docker service that solves CF challenges using a real Chrome browser.
+# Without it the bot falls back to Playwright (usually still blocked) and then skips
+# any match where stats cannot be fetched.
+FS_URL="${FLARESOLVERR_URL:-http://localhost:8191/v1}"
+FS_HOST=$(echo "$FS_URL" | sed 's|/v1||')
+if curl -sf --max-time 2 "$FS_HOST/health" >/dev/null 2>&1; then
+    echo "[start.sh] FlareSolverr detected at $FS_URL ✓"
+else
+    echo ""
+    echo "  ┌─────────────────────────────────────────────────────────────────┐"
+    echo "  │  FlareSolverr NOT running — tennisstats.com will be BLOCKED     │"
+    echo "  │                                                                   │"
+    echo "  │  tennisstats.com requires FlareSolverr to bypass Cloudflare.    │"
+    echo "  │  Start it now (requires Docker):                                 │"
+    echo "  │                                                                   │"
+    echo "  │    docker run -d --name flaresolverr -p 8191:8191 \\             │"
+    echo "  │      ghcr.io/flaresolverr/flaresolverr:latest                   │"
+    echo "  │                                                                   │"
+    echo "  │  The bot will still run but skip matches with missing stats.     │"
+    echo "  └─────────────────────────────────────────────────────────────────┘"
+    echo ""
+fi
+
 echo "[start.sh] Starting TennisBot77 engine + web server..."
 echo "[start.sh] Web dashboard → http://localhost:8000"
 echo "[start.sh] Press Ctrl+C to stop."

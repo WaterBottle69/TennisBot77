@@ -277,3 +277,15 @@ class Config:
     SPORTRADAR_WS_URL: str      = "wss://api.sportradar.com/tennis/trial/v3/en/stream/events/subscribe"
     SPORTRADAR_REST_BASE: str   = "https://api.sportradar.com/tennis/trial/v3/en"
 
+    # ── FlareSolverr (Cloudflare bypass) ───────────────────────────────────────
+    # FlareSolverr is a self-hosted proxy that uses a real Chrome browser to solve
+    # Cloudflare Managed Challenges — the kind that blocks aiohttp, curl_cffi,
+    # and headless Playwright on tennisstats.com.
+    #
+    # Start it once with Docker (image is ~300 MB, container uses ~200 MB RAM):
+    #   docker run -d --name flaresolverr -p 8191:8191 \
+    #     ghcr.io/flaresolverr/flaresolverr:latest
+    #
+    # If this URL is unreachable the scraper falls back to Playwright automatically.
+    FLARESOLVERR_URL: str       = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+

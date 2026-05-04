@@ -83,11 +83,18 @@ async def read_root():
 # Monte Carlo prediction
 # ──────────────────────────────────────────────────────────────────────────────
 
-global_scraper = ATCScraper()
+_scraper_cfg = Config()
+global_scraper: ATCScraper = None  # lazy init on first prediction request
+
+def _get_scraper() -> ATCScraper:
+    global global_scraper
+    if global_scraper is None:
+        global_scraper = ATCScraper(api_key=_scraper_cfg.API_TENNIS_KEY)
+    return global_scraper
 
 @app.post("/api/predict")
 async def create_prediction(req: PredictRequest):
-    matchup_data = await global_scraper.get_pregame_matchup(req.player_a, req.player_b)
+    matchup_data = await _get_scraper().get_pregame_matchup(req.player_a, req.player_b)
     
     slug_a = matchup_data["player_a"].get("slug", "")
     slug_b = matchup_data["player_b"].get("slug", "")

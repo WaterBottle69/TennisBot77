@@ -50,6 +50,8 @@ _NAME_BLACKLIST = {
 
 def _name_to_slug(name: str) -> str:
     """'Carlos Alcaraz' → 'carlos-alcaraz'"""
+    if not name:
+        return ""
     return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
 
 
@@ -102,6 +104,7 @@ class ApiTennisScraper:
         # name slug → player_key int
         self._name_to_key: dict = {}
         self._name_to_key_ts: float = 0.0
+        self._key_cache_lock: asyncio.Lock | None = None  # lazy: created on first async use
         # player_key → profile dict
         self._profile_cache: dict = {}
         self._profile_cache_ts: dict = {}
@@ -111,6 +114,11 @@ class ApiTennisScraper:
         # Sackmann data: lower_fullname → {height_cm, hand}
         self._sackmann: dict = {}
         self._sackmann_ts: float = 0.0
+        # per-player recent match cache: player_key → (fetched_at, sequence_list)
+        self._recent_matches: dict = {}
+        self._recent_lock: asyncio.Lock | None = None
+        # Limit concurrent API requests to avoid 500s from the upstream endpoint.
+        self._api_sem: asyncio.Semaphore | None = None
         self._session: aiohttp.ClientSession = None
 
     def _get_session(self) -> aiohttp.ClientSession:
@@ -130,17 +138,20 @@ class ApiTennisScraper:
 
     async def _get_json(self, params: dict) -> dict:
         """GET request to api-tennis.com, returns parsed JSON dict."""
+        if self._api_sem is None:
+            self._api_sem = asyncio.Semaphore(3)  # max 3 concurrent requests
         params = dict(params)
         params["APIkey"] = self._api_key
         try:
-            session = self._get_session()
-            async with session.get(
-                _API_BASE, params=params, timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                if resp.status != 200:
-                    log.warning("[API-TENNIS] HTTP %s for %s", resp.status, params.get("method"))
-                    return {}
-                return await resp.json(content_type=None)
+            async with self._api_sem:
+                session = self._get_session()
+                async with session.get(
+                    _API_BASE, params=params, timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning("[API-TENNIS] HTTP %s for %s", resp.status, params.get("method"))
+                        return {}
+                    return await resp.json(content_type=None)
         except Exception as exc:
             log.warning("[API-TENNIS] Request failed (%s): %s", params.get("method"), exc)
             self._session = None
@@ -155,36 +166,83 @@ class ApiTennisScraper:
         if self._name_to_key and _time.time() - self._name_to_key_ts < self._KEY_CACHE_TTL:
             return
 
-        today = date.today()
-        start = (today - timedelta(days=14)).isoformat()
-        stop  = today.isoformat()
+        if self._key_cache_lock is None:
+            self._key_cache_lock = asyncio.Lock()
 
-        log.info("[API-TENNIS] Refreshing player key cache (last 14 days of fixtures)...")
-        data = await self._get_json({
-            "method": "get_fixtures",
-            "date_start": start,
-            "date_stop":  stop,
-        })
+        async with self._key_cache_lock:
+            # Re-check using timestamp only — cache may be empty after a 500, but
+            # we still don't want every queued coroutine to retry immediately.
+            if _time.time() - self._name_to_key_ts < self._KEY_CACHE_TTL:
+                return
 
-        added = 0
-        for event in data.get("result", []):
-            # Skip doubles
-            etype = event.get("event_type_type", "")
-            if "Doubles" in etype or "doubles" in etype:
-                continue
-            p1 = event.get("event_first_player", "")
-            k1 = event.get("first_player_key")
-            p2 = event.get("event_second_player", "")
-            k2 = event.get("second_player_key")
-            if p1 and k1:
-                self._name_to_key[_name_to_slug(p1)] = int(k1)
-                added += 1
-            if p2 and k2:
-                self._name_to_key[_name_to_slug(p2)] = int(k2)
-                added += 1
+            today = date.today()
+            start = (today - timedelta(days=14)).isoformat()
+            stop  = today.isoformat()
 
-        self._name_to_key_ts = _time.time()
-        log.info("[API-TENNIS] Key cache built: %d unique player slugs", len(self._name_to_key))
+            log.info("[API-TENNIS] Refreshing player key cache (last 14 days of fixtures)...")
+            data = await self._get_json({
+                "method": "get_fixtures",
+                "date_start": start,
+                "date_stop":  stop,
+            })
+
+            added = 0
+            now = datetime.now()
+            # Collect per-player match sequences while scanning fixtures.
+            _seq_builder: dict = {}  # player_key → list of [opp_rank, surf, win_loss, days_since]
+
+            for event in data.get("result", []):
+                etype = event.get("event_type_type", "")
+                if "Doubles" in etype or "doubles" in etype:
+                    continue
+                p1 = event.get("event_first_player", "")
+                k1 = event.get("first_player_key")
+                p2 = event.get("event_second_player", "")
+                k2 = event.get("second_player_key")
+                if p1 and k1:
+                    self._name_to_key[_name_to_slug(p1)] = int(k1)
+                    added += 1
+                if p2 and k2:
+                    self._name_to_key[_name_to_slug(p2)] = int(k2)
+                    added += 1
+
+                # Build recent-match rows from completed singles matches.
+                if event.get("event_status") not in ("Finished", "FT"):
+                    continue
+                if "Singles" not in etype and "singles" not in etype:
+                    continue
+                try:
+                    k1i = int(k1) if k1 else 0
+                    k2i = int(k2) if k2 else 0
+                    if not (k1i and k2i):
+                        continue
+                    m_date = datetime.strptime(event["event_date"], "%Y-%m-%d")
+                    days_since = float((now - m_date).days)
+                    tour = event.get("tournament_name", "").lower()
+                    if any(w in tour for w in ("clay", "tierra", "roland")):
+                        surf = 2.0
+                    elif any(w in tour for w in ("grass", "wimbledon", "halle")):
+                        surf = 3.0
+                    else:
+                        surf = 1.0
+                    winner = event.get("event_winner", "")
+                    for pk, opp_key, won in (
+                        (k1i, k2i, winner == "First Player"),
+                        (k2i, k1i, winner == "Second Player"),
+                    ):
+                        opp_rank = float(self._profile_cache.get(opp_key, {}).get("ranking", 100))
+                        _seq_builder.setdefault(pk, []).append(
+                            [opp_rank, surf, 1.0 if won else 0.0, days_since]
+                        )
+                except Exception:
+                    pass
+
+            ts_now = _time.time()
+            for pk, rows in _seq_builder.items():
+                self._recent_matches[pk] = (ts_now, rows)
+
+            self._name_to_key_ts = ts_now
+            log.info("[API-TENNIS] Key cache built: %d unique player slugs", len(self._name_to_key))
 
     def _resolve_key(self, name: str) -> int:
         """Fuzzy-match player name to a player_key. Returns 0 if not found."""
@@ -465,15 +523,35 @@ class ApiTennisScraper:
         """
         Return the last N singles matches for a player as
         [[opp_rank, surface, win_loss, days_since], ...] (chronological order).
-        Used by the LSTM sequential model.
+        Used by the LSTM sequential model. Sequences come from the key-cache
+        fixture data (built by _ensure_key_cache) — no additional API calls.
         """
         await self._ensure_key_cache()
         player_key = self._name_to_key.get(slug) or self._resolve_key(slug)
         if not player_key:
             return [[0.0, 0.0, 0.0, 0.0]] * n
 
+        cached = self._recent_matches.get(player_key)
+        if cached:
+            _, seq = cached
+            padded = list(seq)
+            while len(padded) < n:
+                padded.insert(0, [0.0, 0.0, 0.0, 0.0])
+            return padded[-n:]
+
+        # Key cache didn't have completed matches for this player (14-day window
+        # may be too short). Return zero-padded sequence — model handles this.
+        return [[0.0, 0.0, 0.0, 0.0]] * n
+
+    async def _fetch_recent_matches_unused(self, slug: str, n: int = 10) -> list:
+        """Retained as reference — no longer used (avoids per-player fixture calls)."""
+        await self._ensure_key_cache()
+        player_key = self._name_to_key.get(slug) or self._resolve_key(slug)
+        if not player_key:
+            return [[0.0, 0.0, 0.0, 0.0]] * n
+
         today = date.today()
-        start = (today - timedelta(days=180)).isoformat()
+        start = (today - timedelta(days=60)).isoformat()
         stop  = today.isoformat()
 
         data = await self._get_json({
@@ -533,7 +611,9 @@ class ApiTennisScraper:
         while len(sequence) < n:
             sequence.insert(0, [0.0, 0.0, 0.0, 0.0])
 
-        return sequence[-n:]  # chronological (oldest → newest)
+        result = sequence[-n:]
+        self._recent_matches[player_key] = (_time.time(), result)
+        return result  # chronological (oldest → newest)
 
     async def get_pregame_matchup(self, player_a_name: str, player_b_name: str) -> dict:
         """
@@ -569,5 +649,6 @@ class ApiTennisScraper:
         return _name_to_slug(name)
 
 
-# Module alias so existing imports (from tennis_scraper import TennisStatsScraper) still work
+# Module aliases so existing imports still work
 TennisStatsScraper = ApiTennisScraper
+ATCScraper = ApiTennisScraper

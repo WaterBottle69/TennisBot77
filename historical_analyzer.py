@@ -19,7 +19,7 @@ class HistoricalAnalyzer:
     def __init__(self, config: Config):
         self.cfg = config
         self._scraper = TennisStatsScraper(
-            flaresolverr_url=getattr(config, "FLARESOLVERR_URL", "")
+            api_key=getattr(config, "API_TENNIS_KEY", ""),
         )
 
     async def close(self):

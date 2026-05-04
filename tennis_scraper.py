@@ -1,103 +1,122 @@
 """
-TennisStats.com Scraper
-=======================
-Pulls live ATP rankings and player profiles from https://tennisstats.com.
+api-tennis.com Scraper
+======================
+Replaces the old tennisstats.com scraper. Uses the api-tennis.com REST API
+for player rankings, profiles, and serve statistics.
 
-URLs used (no auth, fully public):
-  Rankings : https://tennisstats.com/rankings/atp
-  Profile  : https://tennisstats.com/players/{player-slug}
-  H2H      : https://tennisstats.com/h2h/{player-a}-vs-{player-b}
+API key is read from kalshi_keys.json ("api_tennis_key") or the
+API_TENNIS_KEY environment variable.
 
-Why we switched from atptour.com:
-  atptour.com now blocks aiohttp with an SSL cert verification error and
-  hides win-rate data behind JavaScript rendering, making it effectively
-  unusable for server-side scraping without a headless browser.
+Endpoints used:
+  get_fixtures  → builds name→player_key cache from recent matches
+  get_players   → per-season stats: rank, surface W/L, titles, DOB
+  get_livescore → (bonus) live scores with serve statistics per point
+  get_H2H       → head-to-head history
+
+Height and handedness come from Jeff Sackmann's free GitHub CSV
+(atp_players.csv / wta_players.csv) — these are permanent player
+attributes that never change and are not provided by the API.
 """
 
 import aiohttp
 import asyncio
-import ssl
-import re
+import csv
+import io
 import logging
-from bs4 import BeautifulSoup
+import re
+import ssl
+import time as _time
+from datetime import date, datetime, timedelta
 from difflib import get_close_matches
 
 log = logging.getLogger(__name__)
 
-# Reusable SSL context that skips certificate verification.
-# tennisstats.com has a valid cert, but this guards against any local CA issues.
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+_API_BASE = "https://api.api-tennis.com/tennis/"
 
-# Blacklist of terms that should NEVER be resolved as tennis players
-# (e.g. countries, teams, generic sport terms)
+# Sackmann GitHub CSVs for height + handedness (static player attributes)
+_SACKMANN_ATP = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_players.csv"
+_SACKMANN_WTA = "https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_players.csv"
+
 _NAME_BLACKLIST = {
-    "argentina", "jordan", "brazil", "france", "germany", "england", "spain", 
+    "argentina", "jordan", "brazil", "france", "germany", "england", "spain",
     "italy", "usa", "mexico", "canada", "australia", "china", "japan",
     "team", "club", "all-stars", "field", "other", "any", "combined",
 }
 
 
 def _name_to_slug(name: str) -> str:
-    """Convert 'Carlos Alcaraz' → 'carlos-alcaraz'."""
+    """'Carlos Alcaraz' → 'carlos-alcaraz'"""
     return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
 
 
-class TennisStatsScraper:
+def _age_from_dob(dob_str: str) -> int:
+    """Parse 'DD.MM.YYYY' or 'YYYYMMDD' and return age in years."""
+    try:
+        if "." in dob_str:
+            d = datetime.strptime(dob_str, "%d.%m.%Y")
+        else:
+            d = datetime.strptime(dob_str, "%Y%m%d")
+        today = date.today()
+        return today.year - d.year - ((today.month, today.day) < (d.month, d.day))
+    except Exception:
+        return 25
+
+
+class ApiTennisScraper:
     """
-    Scraper backed by tennisstats.com.
+    Drop-in replacement for TennisStatsScraper using api-tennis.com.
 
-    Data returned per player:
-      slug         – URL-safe identifier (e.g. 'carlos-alcaraz')
-      ranking      – int ATP singles rank
-      elo          – int ELO points (tennisstats proprietary score)
-      win_rate     – float career wins / (wins + losses)
-      career_wins  – int
-      career_losses– int
-      season_wins  – int  (current year)
-      season_losses– int
-      aces_per_match – float (current year, 3-set matches)
-      double_faults  – float (current year, 3-set matches)
-      break_pts_won  – float (current year, 3-set matches)
-      prize_money  – str  (formatted, e.g. '$53,902,993')
-      profile_url  – str  full URL
+    Public interface is identical so historical_analyzer.py / main.py
+    require no changes.
+
+    Data returned per player (same keys as the old scraper):
+      slug           – URL-safe name (e.g. 'carlos-alcaraz')
+      player_key     – api-tennis.com numeric ID
+      ranking        – int current singles rank
+      elo            – 0 (API does not provide ELO; disables pts_rank edge gracefully)
+      win_rate       – float career wins/(wins+losses)
+      career_wins    – int
+      career_losses  – int
+      season_wins    – int current year
+      season_losses  – int current year
+      surface_win_rate – float win rate on current match surface
+      recent_win_rate  – float win rate over last 2 seasons
+      age            – int
+      height_cm      – int (from Sackmann CSV)
+      hand           – 'R' or 'L' (from Sackmann CSV)
+      profile_url    – str
     """
 
-    BASE = "https://tennisstats.com"
+    _KEY_CACHE_TTL  = 3600 * 6   # rebuild name→key cache every 6 hours
+    _PROFILE_TTL    = 3600       # cache player profiles for 1 hour
+    _SACKMANN_TTL   = 86400 * 7  # refresh Sackmann CSV weekly
+    _RANKINGS_TTL   = 3600       # rankings cache TTL
 
-    _RANKINGS_TTL = 3600.0    # re-fetch rankings at most once per hour
-    _PROFILE_TTL  = 86400.0   # re-fetch player profiles at most once per day
-
-    def __init__(self, flaresolverr_url: str = ""):
-        self._rankings = None   # type: dict | None  # slug → data dict, populated lazily
-        self._rankings_fetched_at: float = 0.0
-        self._profile_cache: dict = {}       # slug → profile dict
-        self._profile_cache_ts: dict = {}    # slug → fetch timestamp
-        self._session: aiohttp.ClientSession | None = None
+    def __init__(self, api_key: str = "", **_kwargs):
         import os
-        self._flaresolverr_url = (
-            flaresolverr_url
-            or os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
-        )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        self._api_key = api_key or os.getenv("API_TENNIS_KEY", "")
+        # name slug → player_key int
+        self._name_to_key: dict = {}
+        self._name_to_key_ts: float = 0.0
+        # player_key → profile dict
+        self._profile_cache: dict = {}
+        self._profile_cache_ts: dict = {}
+        # slug → rankings entry (for fetch_rankings compat)
+        self._rankings: dict = {}
+        self._rankings_ts: float = 0.0
+        # Sackmann data: lower_fullname → {height_cm, hand}
+        self._sackmann: dict = {}
+        self._sackmann_ts: float = 0.0
+        self._session: aiohttp.ClientSession = None
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
-            self._session = aiohttp.ClientSession(headers=_HEADERS, connector=connector)
+            self._session = aiohttp.ClientSession(connector=connector)
         return self._session
 
     async def close(self):
@@ -105,536 +124,450 @@ class TennisStatsScraper:
             await self._session.close()
             self._session = None
 
-    async def _get(self, url: str):
-        """Fetch a URL and return its HTML, or None on failure.
+    # ------------------------------------------------------------------
+    # Core HTTP helper
+    # ------------------------------------------------------------------
 
-        Tier 1: aiohttp (fast, no overhead).
-        Tier 2: FlareSolverr (bypasses Cloudflare Managed Challenge via real Chrome).
-        Tier 3: Playwright headless Chromium (last resort, often blocked by CF).
-
-        FlareSolverr must be running locally — start it with:
-          docker run -d --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
-        """
-        # ── Tier 1: fast path ────────────────────────────────────────────
+    async def _get_json(self, params: dict) -> dict:
+        """GET request to api-tennis.com, returns parsed JSON dict."""
+        params = dict(params)
+        params["APIkey"] = self._api_key
         try:
             session = self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                if r.status == 200:
-                    return await r.text()
-                log.warning("HTTP %s for %s — trying FlareSolverr", r.status, url)
+            async with session.get(
+                _API_BASE, params=params, timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                if resp.status != 200:
+                    log.warning("[API-TENNIS] HTTP %s for %s", resp.status, params.get("method"))
+                    return {}
+                return await resp.json(content_type=None)
         except Exception as exc:
-            log.warning("aiohttp failed for %s (%s) — trying FlareSolverr", url, exc)
+            log.warning("[API-TENNIS] Request failed (%s): %s", params.get("method"), exc)
             self._session = None
-
-        # ── Tier 2: FlareSolverr ─────────────────────────────────────────
-        html = await self._get_via_flaresolverr(url)
-        if html:
-            return html
-
-        # ── Tier 3: Playwright (last resort) ─────────────────────────────
-        log.warning("FlareSolverr unavailable for %s — falling back to Playwright", url)
-        return await self._get_via_playwright(url)
-
-    async def _get_via_flaresolverr(self, url: str):
-        """
-        Route the request through a local FlareSolverr instance.
-
-        FlareSolverr launches a real Chrome browser that can solve Cloudflare
-        Managed Challenge — the same challenge that blocks aiohttp, curl_cffi,
-        and headless Playwright.
-
-        Start FlareSolverr (one-time Docker command):
-          docker run -d --name flaresolverr -p 8191:8191 \\
-            ghcr.io/flaresolverr/flaresolverr:latest
-
-        If FlareSolverr is not running the call will fail immediately (connection
-        refused) and we fall through to the Playwright tier.
-        """
-        fs_url = self._flaresolverr_url
-
-        payload = {
-            "cmd": "request.get",
-            "url": url,
-            "maxTimeout": 60000,
-        }
-
-        try:
-            # Use a bare ClientSession (no custom SSL / headers) for the local API call
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    fs_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=75),  # slightly above maxTimeout
-                ) as resp:
-                    if resp.status != 200:
-                        log.warning("[FLARESOLVERR] HTTP %s from %s", resp.status, fs_url)
-                        return None
-                    data = await resp.json()
-
-            solution = data.get("solution", {})
-            status   = solution.get("status", 0)
-            html     = solution.get("response", "")
-
-            if status != 200 or not html:
-                log.warning("[FLARESOLVERR] Non-200 solution status=%s for %s", status, url)
-                return None
-
-            # Sanity-check: if Cloudflare's JS challenge page slipped through
-            if "Just a moment" in html and "cf-mitigated" in html:
-                log.warning("[FLARESOLVERR] Challenge page returned for %s", url)
-                return None
-
-            log.info("[FLARESOLVERR] Successfully fetched %s", url)
-            return html
-
-        except aiohttp.ClientConnectorError:
-            # FlareSolverr is not running — silent fallthrough to Playwright
-            log.info("[FLARESOLVERR] Not running at %s — skipping", fs_url)
-            return None
-        except Exception as exc:
-            log.warning("[FLARESOLVERR] Error for %s: %s", url, exc)
-            return None
-
-    async def _get_via_playwright(self, url: str):
-        """Headless Chromium fetch (last resort — often blocked by Cloudflare Managed Challenge)."""
-        try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            log.error("playwright not installed — run: pip install playwright && python -m playwright install chromium")
-            return None
-
-        try:
-            log.info("[PLAYWRIGHT] Launching Chromium for %s", url)
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(headless=True)
-                ctx = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    locale="en-US",
-                )
-                page = await ctx.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                try:
-                    await page.wait_for_selector("a[href^='/players/']", timeout=20_000)
-                except Exception:
-                    pass
-                html = await page.content()
-                await browser.close()
-
-            if "Just a moment" in html or "cf-mitigated" in html:
-                log.warning("[PLAYWRIGHT] Cloudflare challenge not resolved for %s", url)
-                return None
-
-            log.info("[PLAYWRIGHT] Successfully fetched %s via Chromium", url)
-            return html
-
-        except Exception as exc:
-            log.error("[PLAYWRIGHT] Failed for %s: %s", url, exc)
-            return None
+            return {}
 
     # ------------------------------------------------------------------
-    # Rankings
+    # Name → player_key cache
+    # ------------------------------------------------------------------
+
+    async def _ensure_key_cache(self):
+        """Build/refresh the name→player_key lookup from recent fixtures."""
+        if self._name_to_key and _time.time() - self._name_to_key_ts < self._KEY_CACHE_TTL:
+            return
+
+        today = date.today()
+        start = (today - timedelta(days=14)).isoformat()
+        stop  = today.isoformat()
+
+        log.info("[API-TENNIS] Refreshing player key cache (last 14 days of fixtures)...")
+        data = await self._get_json({
+            "method": "get_fixtures",
+            "date_start": start,
+            "date_stop":  stop,
+        })
+
+        added = 0
+        for event in data.get("result", []):
+            # Skip doubles
+            etype = event.get("event_type_type", "")
+            if "Doubles" in etype or "doubles" in etype:
+                continue
+            p1 = event.get("event_first_player", "")
+            k1 = event.get("first_player_key")
+            p2 = event.get("event_second_player", "")
+            k2 = event.get("second_player_key")
+            if p1 and k1:
+                self._name_to_key[_name_to_slug(p1)] = int(k1)
+                added += 1
+            if p2 and k2:
+                self._name_to_key[_name_to_slug(p2)] = int(k2)
+                added += 1
+
+        self._name_to_key_ts = _time.time()
+        log.info("[API-TENNIS] Key cache built: %d unique player slugs", len(self._name_to_key))
+
+    def _resolve_key(self, name: str) -> int:
+        """Fuzzy-match player name to a player_key. Returns 0 if not found."""
+        slug = _name_to_slug(name)
+
+        if slug in self._name_to_key:
+            return self._name_to_key[slug]
+
+        # Last-name-only (no hyphen) → find highest-priority entry ending with it
+        if "-" not in slug and len(slug) >= 3:
+            for k in self._name_to_key:
+                if k.endswith(f"-{slug}"):
+                    return self._name_to_key[k]
+
+        candidates = get_close_matches(slug, self._name_to_key.keys(), n=1, cutoff=0.75)
+        if candidates:
+            resolved = candidates[0]
+            if any(p in _NAME_BLACKLIST for p in resolved.split("-")):
+                return 0
+            return self._name_to_key[resolved]
+
+        return 0
+
+    # ------------------------------------------------------------------
+    # Sackmann CSV (height + handedness)
+    # ------------------------------------------------------------------
+
+    async def _ensure_sackmann(self):
+        """Download Sackmann player CSVs for height and handedness."""
+        if self._sackmann and _time.time() - self._sackmann_ts < self._SACKMANN_TTL:
+            return
+
+        log.info("[API-TENNIS] Refreshing Sackmann player CSV (height + hand)...")
+        for url in [_SACKMANN_ATP, _SACKMANN_WTA]:
+            try:
+                session = self._get_session()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        log.warning("[SACKMANN] HTTP %s for %s", resp.status, url)
+                        continue
+                    text = await resp.text()
+                reader = csv.DictReader(io.StringIO(text))
+                for row in reader:
+                    fname = row.get("name_first", "").strip().lower()
+                    lname = row.get("name_last", "").strip().lower()
+                    if not fname or not lname:
+                        continue
+                    key = f"{fname}-{lname}"
+                    ht_raw = row.get("height", "").strip()
+                    hand_raw = row.get("hand", "").strip().upper()
+                    dob_raw = row.get("dob", "").strip()
+                    self._sackmann[key] = {
+                        "height_cm": int(ht_raw) if ht_raw.isdigit() else None,
+                        "hand": hand_raw if hand_raw in ("R", "L") else None,
+                        "dob": dob_raw,
+                    }
+            except Exception as exc:
+                log.warning("[SACKMANN] Failed to load %s: %s", url, exc)
+
+        self._sackmann_ts = _time.time()
+        log.info("[API-TENNIS] Sackmann loaded: %d players", len(self._sackmann))
+
+    def _sackmann_lookup(self, full_name: str) -> dict:
+        """Return {height_cm, hand} for a player by full name, or {} if unknown."""
+        slug = _name_to_slug(full_name)  # "jannik-sinner"
+        if slug in self._sackmann:
+            return self._sackmann[slug]
+        # Fuzzy fallback
+        candidates = get_close_matches(slug, self._sackmann.keys(), n=1, cutoff=0.80)
+        return self._sackmann.get(candidates[0], {}) if candidates else {}
+
+    # ------------------------------------------------------------------
+    # Player profile from API
+    # ------------------------------------------------------------------
+
+    async def _fetch_api_profile(self, player_key: int) -> dict:
+        """Fetch and cache a player profile from get_players."""
+        if player_key in self._profile_cache:
+            if _time.time() - self._profile_cache_ts.get(player_key, 0) < self._PROFILE_TTL:
+                return self._profile_cache[player_key]
+
+        data = await self._get_json({"method": "get_players", "player_key": player_key})
+        result = data.get("result", [])
+        if not result or not isinstance(result, list):
+            return {}
+
+        raw = result[0]
+        stats = [s for s in raw.get("stats", []) if s.get("type") == "singles"]
+        cur_year = str(date.today().year)
+
+        # Current rank: most recent singles season with a valid rank
+        ranking = 999
+        for s in sorted(stats, key=lambda x: x.get("season", ""), reverse=True):
+            r = s.get("rank", "")
+            if r and str(r).isdigit() and int(r) > 0:
+                ranking = int(r)
+                break
+
+        # Career totals (singles)
+        career_wins   = sum(int(s.get("matches_won", 0) or 0) for s in stats)
+        career_losses = sum(int(s.get("matches_lost", 0) or 0) for s in stats)
+        win_rate = career_wins / (career_wins + career_losses) if (career_wins + career_losses) > 0 else 0.5
+
+        # Season W/L
+        season_wins = season_losses = 0
+        for s in stats:
+            if s.get("season") == cur_year:
+                season_wins   = int(s.get("matches_won",  0) or 0)
+                season_losses = int(s.get("matches_lost", 0) or 0)
+                break
+
+        # Recent win rate (last 2 full seasons of singles)
+        recent_w = recent_l = 0
+        recent_seasons = sorted(
+            [s for s in stats if s.get("season", "") and s["season"].isdigit()],
+            key=lambda x: int(x["season"]), reverse=True
+        )[:2]
+        for s in recent_seasons:
+            recent_w += int(s.get("matches_won",  0) or 0)
+            recent_l += int(s.get("matches_lost", 0) or 0)
+        recent_win_rate = recent_w / (recent_w + recent_l) if (recent_w + recent_l) > 0 else win_rate
+
+        # Surface win rates (all-time singles)
+        def _surf_rate(won_key, lost_key):
+            w = sum(int(s.get(won_key, 0) or 0) for s in stats)
+            l = sum(int(s.get(lost_key, 0) or 0) for s in stats)
+            return round(w / (w + l), 4) if (w + l) > 0 else 0.5
+
+        hard_wr  = _surf_rate("hard_won",  "hard_lost")
+        clay_wr  = _surf_rate("clay_won",  "clay_lost")
+        grass_wr = _surf_rate("grass_won", "grass_lost")
+
+        # Age from DOB
+        dob_str = raw.get("player_bday", "")
+        age = _age_from_dob(dob_str) if dob_str else 25
+
+        profile = {
+            "player_key":      player_key,
+            "player_full_name": raw.get("player_full_name", raw.get("player_name", "")),
+            "ranking":         ranking,
+            "elo":             0,      # API doesn't provide ELO; disables pts_rank edge
+            "win_rate":        round(win_rate, 4),
+            "career_wins":     career_wins,
+            "career_losses":   career_losses,
+            "season_wins":     season_wins,
+            "season_losses":   season_losses,
+            "recent_win_rate": round(recent_win_rate, 4),
+            "hard_win_rate":   hard_wr,
+            "clay_win_rate":   clay_wr,
+            "grass_win_rate":  grass_wr,
+            "age":             age,
+            "profile_url":     f"https://api-tennis.com/player/{player_key}",
+        }
+
+        self._profile_cache[player_key] = profile
+        self._profile_cache_ts[player_key] = _time.time()
+        return profile
+
+    # ------------------------------------------------------------------
+    # Public API (same interface as TennisStatsScraper)
     # ------------------------------------------------------------------
 
     async def fetch_rankings(self) -> dict:
         """
-        Scrape the full ATP singles rankings from tennisstats.com.
-
-        Returns a dict keyed by *player slug* (e.g. 'carlos-alcaraz') where
-        each value is a basic data dict with ranking, elo, career W-L etc.
-        Cached in memory for the lifetime of this scraper instance.
+        Return a slug→data dict of known players (built from key cache).
+        Used by main.py for the ranking-threshold gate.
         """
-        import time as _time
-        if (self._rankings is not None
-                and _time.time() - self._rankings_fetched_at < self._RANKINGS_TTL):
+        if self._rankings and _time.time() - self._rankings_ts < self._RANKINGS_TTL:
             return self._rankings
 
-        rankings: dict = {}
-        
-        for tour in ["atp", "wta"]:
-            url = f"{self.BASE}/rankings/{tour}"
-            html = await self._get(url)
-            if not html:
-                log.error(f"Could not fetch {tour.upper()} rankings from tennisstats.com")
-                continue
+        await self._ensure_key_cache()
 
-            soup = BeautifulSoup(html, "html.parser")
+        # Build a lightweight rankings dict from the key cache
+        rankings = {}
+        for slug, key in self._name_to_key.items():
+            rankings[slug] = {
+                "slug": slug,
+                "player_key": key,
+                "ranking": 999,  # filled in when profile is fetched
+                "elo": 0,
+                "win_rate": 0.5,
+                "career_wins": 0,
+                "career_losses": 0,
+                "profile_url": f"https://api-tennis.com/player/{key}",
+                "season_wins": None,
+                "season_losses": None,
+            }
 
-            # Each player row is an <a> tag whose href starts with /players/
-            for a in soup.find_all("a", href=re.compile(r"^/players/[^/]+$")):
-                href = a["href"]
-                slug = href.split("/players/")[-1].strip("/")
-                if not slug:
-                    continue
-
-                raw = a.get_text(" ", strip=True)
-
-                # Pattern in the raw text for a rankings row:
-                # "1Carlos Alcaraz8913,590 22 19 4.33 1.83 $53,902,993"
-                # Fields: rank, name, age, elo, ?, wins, losses, aces, df, prize
-                # We use regex to extract rank + career record robustly.
-                rank_match = re.match(r"^(\d+)", raw)
-                rank = int(rank_match.group(1)) if rank_match else 999
-
-                # ELO is the first standalone number >= 1000 after the player name
-                elo_match = re.search(r"\b(\d{1,2},\d{3})\b", raw)
-                elo = int(elo_match.group(1).replace(",", "")) if elo_match else 0
-
-                # Career W-L: two consecutive integers after the ELO field
-                # Raw format: "... <elo> <wins> <losses> <aces> ..."
-                # We anchor the search to start after the ELO match so we don't
-                # accidentally match the age field or the ELO digits themselves.
-                _wl_search_start = elo_match.end() if elo_match else 0
-                wl_match = re.search(r"\b(\d{1,3})\s+(\d{1,3})\b", raw[_wl_search_start:])
-                wins   = int(wl_match.group(1)) if wl_match else 0
-                losses = int(wl_match.group(2)) if wl_match else 0
-                win_rate = wins / (wins + losses) if (wins + losses) > 0 else 0.5
-
-                prize_match = re.search(r"\$[\d,]+", raw)
-                prize = prize_match.group(0) if prize_match else "N/A"
-
-                rankings[slug] = {
-                    "slug":         slug,
-                    "ranking":      rank,
-                    "elo":          elo,
-                    "win_rate":     round(win_rate, 4),
-                    "career_wins":  wins,
-                    "career_losses": losses,
-                    "prize_money":  prize,
-                    "profile_url":  f"{self.BASE}{href}",
-                    # Will be enriched when we load the full profile
-                    "season_wins":   None,
-                    "season_losses": None,
-                    "aces_per_match": None,
-                    "double_faults":  None,
-                    "break_pts_won":  None,
-                }
-
-        import time as _time
-        log.info("Loaded %d players from tennisstats.com ATP/WTA rankings", len(rankings))
         self._rankings = rankings
-        self._rankings_fetched_at = _time.time()
+        self._rankings_ts = _time.time()
         return rankings
 
-    # ------------------------------------------------------------------
-    # Player profile
-    # ------------------------------------------------------------------
-
     async def fetch_player_profile(self, slug: str) -> dict:
-        """
-        Fetch the detailed profile page for one player and return a merged
-        data dict (ranking data + profile enrichments).
-        """
-        import time as _t
-        if slug in self._profile_cache:
-            if _t.time() - self._profile_cache_ts.get(slug, 0) < self._PROFILE_TTL:
-                return self._profile_cache[slug]
-
-        url = f"{self.BASE}/players/{slug}"
-        html = await self._get(url)
-        if not html:
+        """Compatibility shim: resolve slug → key → profile."""
+        await self._ensure_key_cache()
+        key = self._name_to_key.get(slug) or self._resolve_key(slug)
+        if not key:
             return {}
-
-        soup = BeautifulSoup(html, "html.parser")
-        text = soup.get_text(" ", strip=True)
-
-        result: dict = {"slug": slug, "profile_url": url}
-
-        # ATP rank
-        rank_m = re.search(r"ATP\s+Rank\s*(\d+)", text, re.I)
-        if rank_m:
-            result["ranking"] = int(rank_m.group(1))
-
-        # ATP ranking points (labelled "elo" for legacy reasons)
-        # Only store if > 100 to avoid matching "Break Points Won: 2" etc.
-        elo_m = re.search(r"Points\s+([\d,]+)", text, re.I)
-        if elo_m:
-            _elo_val = int(elo_m.group(1).replace(",", ""))
-            if _elo_val > 100:
-                result["elo"] = _elo_val
-
-        # Career W-L  e.g. "367 - 92"
-        career_m = re.search(r"(\d+)\s*-\s*(\d+)\s*\$", text)
-        if career_m:
-            cw, cl = int(career_m.group(1)), int(career_m.group(2))
-            result["career_wins"]   = cw
-            result["career_losses"] = cl
-            result["win_rate"]      = round(cw / (cw + cl), 4) if (cw + cl) > 0 else 0.5
-
-        # Season W-L from the overview sentence
-        # "In 2026, Carlos Alcaraz is … 17 wins to 2 losses"
-        season_m = re.search(r"(\d+)\s+wins?\s+to\s+(\d+)\s+loss", text, re.I)
-        if season_m:
-            result["season_wins"]   = int(season_m.group(1))
-            result["season_losses"] = int(season_m.group(2))
-
-        # Aces per match (2026, 3-set)
-        aces_m = re.search(r"average\s+of\s+([\d.]+)\s+aces\s+per\s+match", text, re.I)
-        if aces_m:
-            result["aces_per_match"] = float(aces_m.group(1))
-
-        # Double faults per match
-        df_m = re.search(
-            r"averaged\s+([\d.]+)\s+double\s+faults\s+per\s+match\s+in\s+best\s+of\s+3",
-            text, re.I
-        )
-        if df_m:
-            result["double_faults"] = float(df_m.group(1))
-
-        # Average break points won per match
-        bp_m = re.search(
-            r"average\s+of\s+([\d.]+)\s+break\s+points\s+won\s+per\s+match",
-            text, re.I
-        )
-        if bp_m:
-            result["break_pts_won"] = float(bp_m.group(1))
-
-        # First-serve % from overview sentence
-        fs_m = re.search(r"([\d.]+)%\s+on\s+first\s+serves", text, re.I)
-        if fs_m:
-            result["first_serve_pct"] = float(fs_m.group(1))
-
-        # Break-point conversion %
-        bpc_m = re.search(r"converts\s+([\d.]+)%\s+of\s+their\s+break\s+points", text, re.I)
-        if bpc_m:
-            result["bp_conversion_pct"] = float(bpc_m.group(1))
-
-        # Prize money
-        pm_m = re.search(r"\$([\d,]+)", text)
-        if pm_m:
-            result["prize_money"] = "$" + pm_m.group(1)
-
-        # Height — only match realistic player heights (1.50m–2.10m) to avoid
-        # false positives on prize money ("$53m"), dates, or other numeric text.
-        ht_m = re.search(r"\b(1\.[5-9]\d|2\.[0-1]\d)\s*m\b", text)
-        if ht_m:
-            try:
-                result["height_cm"] = int(float(ht_m.group(1)) * 100)
-            except ValueError:
-                pass
-
-        # Age — try several patterns in priority order; validate range 15–50
-        _age_val = None
-        for _age_pat in [
-            r"\bAge\s*:?\s*(\d{1,2})\b",        # "Age: 21" or "Age 21"
-            r"(\d{1,2})\s+years?\s+old\b",        # "21 years old"
-        ]:
-            _m = re.search(_age_pat, text, re.I)
-            if _m:
-                _v = int(_m.group(1))
-                if 15 <= _v <= 50:
-                    _age_val = _v
-                    break
-        if _age_val is not None:
-            result["age"] = _age_val
-            
-        # Handedness
-        if "Right-handed" in text or "Right-Handed" in text:
-            result["hand"] = "R"
-        elif "Left-handed" in text or "Left-Handed" in text:
-            result["hand"] = "L"
-
-        self._profile_cache[slug] = result
-        self._profile_cache_ts[slug] = _t.time()
-        return result
-
-    async def fetch_recent_matches(self, slug: str, n: int = 10) -> list:
-        """
-        Scrape the 'Latest Results' for a player to feed the LSTM sequential model.
-        Returns a list of match features: [[opp_rank, surface, win_loss, days_since], ...]
-        """
-        url = f"{self.BASE}/players/{slug}"
-        html = await self._get(url)
-        if not html:
-            return []
-
-        soup = BeautifulSoup(html, "html.parser")
-        match_rows = soup.select(".h2h-history-row")[:n]
-        
-        # Ensure we have the latest rankings to resolve opponent ranks
-        rankings = await self.fetch_rankings()
-        
-        from datetime import datetime
-        now = datetime.now()
-        
-        sequence = []
-        surface_map = {"hard": 1, "clay": 2, "grass": 3}
-        
-        for row in match_rows:
-            try:
-                # 1. Date (index 1)
-                date_str = row.select_one("div:nth-child(1) p").get_text(strip=True)
-                # Normalise scraped dates like 'Jan 292026' → 'Jan 29 2026'
-                date_str = re.sub(r'(\d{1,2})(\d{4})', r'\1 \2', date_str)
-                m_date = datetime.strptime(date_str.strip(), "%b %d %Y")
-                days_since = (now - m_date).days
-                
-                # 2. Surface (index 2)
-                surf_text = row.select_one("div:nth-child(2) p span").get_text(strip=True).lower()
-                surf_val = surface_map.get(surf_text, 0)
-                
-                # 3. Result — use CSS class on the inner badge div (more reliable than text)
-                result_inner = (row.select_one("div.form-run div") or
-                                row.select_one("div:nth-child(3) div"))
-                if result_inner is not None:
-                    cls = result_inner.get("class", [])
-                    if "win" in cls:
-                        win_loss = 1.0
-                    elif "loss" in cls:
-                        win_loss = 0.0
-                    else:
-                        win_loss = 1.0 if result_inner.get_text(strip=True).upper().startswith("W") else 0.0
-                else:
-                    win_loss = 0.0
-
-                # 4. Opponent name: pick the player name that is NOT us
-                name_a_el = row.select_one("div:nth-child(4) p")
-                name_b_el = row.select_one("div:nth-child(6) p")
-                slug_parts = set(slug.split("-"))
-                opp_name = ""
-                for nel in [name_a_el, name_b_el]:
-                    if nel:
-                        candidate = nel.get_text(strip=True)
-                        if not slug_parts.intersection(set(_name_to_slug(candidate).split("-"))):
-                            opp_name = candidate
-                            break
-                if not opp_name and name_b_el:
-                    opp_name = name_b_el.get_text(strip=True)
-                opp_slug = _name_to_slug(opp_name)
-                opp_rank = rankings.get(opp_slug, {}).get("ranking", 100) # Default to 100 if unknown
-                
-                sequence.append([float(opp_rank), float(surf_val), win_loss, float(days_since)])
-            except Exception as e:
-                log.warning(f"Failed to parse history row: {e}")
-                continue
-                
-        # Pad with zeros if less than n
-        while len(sequence) < n:
-            sequence.append([0.0, 0.0, 0.0, 0.0])
-            
-        return list(reversed(sequence)) # Return chronological order (oldest to newest)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        return await self._fetch_api_profile(key)
 
     async def get_player_data(self, player_name: str) -> dict:
         """
-        Resolve a player by name (fuzzy-matched against slugs) and return
-        a fully enriched data dict.
-
-        Falls back to a generic profile if the player is not found.
+        Main entry point. Resolves player name → API profile → merged data dict.
+        Falls back to a low-quality generic profile if the player is not found.
         """
-        rankings = await self.fetch_rankings()
-        slug = self._resolve_slug(player_name, rankings)
+        await self._ensure_key_cache()
+        await self._ensure_sackmann()
 
-        # Only enrich players who are actually present in the rankings cache.
-        # _resolve_slug always returns a non-None slug (falls back to name-derived
-        # slug), so `if slug:` was always True — we would call fetch_player_profile
-        # for any name, risking a partial/wrong profile being returned.
-        # Guard with `slug in rankings` to ensure we have a verified identity.
-        if slug and slug in rankings:
-            base = rankings[slug].copy()
-            # Enrich with detailed profile page
-            profile = await self.fetch_player_profile(slug)
-            base.update({k: v for k, v in profile.items() if v is not None})
-            log.info(
-                "Loaded %s from tennisstats.com  rank=%s  win_rate=%.3f",
-                player_name, base.get("ranking", "?"), base.get("win_rate", 0.5),
-            )
-            return base
+        player_key = self._resolve_key(player_name)
 
-        log.warning("Player '%s' not found on tennisstats.com – using generic profile", player_name)
-        return {
-            "slug":          _name_to_slug(player_name),
-            "data_quality":  "low",
-            "ranking":       100,
-            "elo":           0,        # 0 signals "unknown" — prevents false pts_vs_rank edge
-            "win_rate":      0.50,
-            "career_wins":   0,
-            "career_losses": 0,
-            "prize_money":   "N/A",
-            "profile_url":   "",
-            "height_cm":     185,      # ATP average — alt×height adjustment becomes 0
-            "hand":          "R",      # assume right-handed — LH signal stays silent
-            "age":           25,       # neutral age — age×temp adjustment minimal
+        if not player_key:
+            log.warning("[API-TENNIS] '%s' not found in key cache — using generic profile", player_name)
+            return self._generic_profile(player_name)
+
+        profile = await self._fetch_api_profile(player_key)
+        if not profile:
+            log.warning("[API-TENNIS] Empty profile for key=%s ('%s')", player_key, player_name)
+            return self._generic_profile(player_name)
+
+        # Merge Sackmann height + hand
+        full_name = profile.get("player_full_name", player_name)
+        sack = self._sackmann_lookup(full_name) or self._sackmann_lookup(player_name)
+        height_cm = sack.get("height_cm") or 185
+        hand      = sack.get("hand") or "R"
+
+        slug = _name_to_slug(player_name)
+        result = {
+            "slug":             slug,
+            "player_key":       player_key,
+            "ranking":          profile["ranking"],
+            "elo":              profile["elo"],
+            "win_rate":         profile["win_rate"],
+            "career_wins":      profile["career_wins"],
+            "career_losses":    profile["career_losses"],
+            "season_wins":      profile["season_wins"],
+            "season_losses":    profile["season_losses"],
+            "recent_win_rate":  profile["recent_win_rate"],
+            "surface_win_rate": profile["hard_win_rate"],  # overridden per-match in main.py
+            "hard_win_rate":    profile["hard_win_rate"],
+            "clay_win_rate":    profile["clay_win_rate"],
+            "grass_win_rate":   profile["grass_win_rate"],
+            "age":              profile["age"],
+            "height_cm":        height_cm,
+            "hand":             hand,
+            "profile_url":      profile["profile_url"],
         }
 
-    def _resolve_slug(self, name: str, rankings: dict):
+        log.info(
+            "[API-TENNIS] Loaded '%s' → rank=%s  win_rate=%.3f  age=%d  hand=%s  ht=%dcm",
+            player_name, result["ranking"], result["win_rate"],
+            result["age"], result["hand"], result["height_cm"],
+        )
+        return result
+
+    def _generic_profile(self, player_name: str) -> dict:
+        return {
+            "slug":             _name_to_slug(player_name),
+            "data_quality":     "low",
+            "ranking":          100,
+            "elo":              0,
+            "win_rate":         0.50,
+            "career_wins":      0,
+            "career_losses":    0,
+            "season_wins":      0,
+            "season_losses":    0,
+            "recent_win_rate":  0.50,
+            "surface_win_rate": 0.50,
+            "hard_win_rate":    0.50,
+            "clay_win_rate":    0.50,
+            "grass_win_rate":   0.50,
+            "age":              25,
+            "height_cm":        185,
+            "hand":             "R",
+            "profile_url":      "",
+        }
+
+    async def fetch_recent_matches(self, slug: str, n: int = 10) -> list:
         """
-        Find the best-matching slug for a given name string.
-
-        Priority:
-          1. Exact slug match      ('carlos-alcaraz' → 'carlos-alcaraz')
-          2. Slug built from name  ('Carlos Alcaraz' → 'carlos-alcaraz')
-          3. Fuzzy match on slugs  (handles minor typos / middle names)
+        Return the last N singles matches for a player as
+        [[opp_rank, surface, win_loss, days_since], ...] (chronological order).
+        Used by the LSTM sequential model.
         """
-        slug_from_name = _name_to_slug(name)
+        await self._ensure_key_cache()
+        player_key = self._name_to_key.get(slug) or self._resolve_key(slug)
+        if not player_key:
+            return [[0.0, 0.0, 0.0, 0.0]] * n
 
-        if slug_from_name in rankings:
-            return slug_from_name
+        today = date.today()
+        start = (today - timedelta(days=180)).isoformat()
+        stop  = today.isoformat()
 
-        # If Kalshi provides ONLY a last name (e.g. "Cerundolo"), there is NO hyphen.
-        # Find the highest ranked player (first in dict) whose slug ends with this last name.
-        if "-" not in slug_from_name and len(slug_from_name) >= 3:
-            for k in rankings:
-                if k.endswith(f"-{slug_from_name}"):
-                    return k
+        data = await self._get_json({
+            "method":     "get_fixtures",
+            "date_start": start,
+            "date_stop":  stop,
+        })
 
-        # Fuzzy fallback using the ENTIRE name string against known rankings
-        candidates = get_close_matches(slug_from_name, rankings.keys(), n=1, cutoff=0.8)
-        
-        if candidates:
-            resolved = candidates[0]
-            if any(p in _NAME_BLACKLIST for p in resolved.split("-")):
-                log.warning("Fuzzy match '%s' for '%s' is on the blacklist and will be rejected.", resolved, name)
-                return slug_from_name
-            return resolved
+        now = datetime.now()
+        sequence = []
 
-        # If not found in the initial rankings cache, DO NOT fallback to random players 
-        # sharing a last name. We must return the exact full name slug so the scraper 
-        # attempts to hit their exact profile page (which may exist if they rank >100).
-        return slug_from_name
+        for event in data.get("result", []):
+            etype = event.get("event_type_type", "")
+            if "Singles" not in etype and "singles" not in etype:
+                continue
+            if event.get("event_status") not in ("Finished", "FT"):
+                continue
+
+            p1_key = event.get("first_player_key")
+            p2_key = event.get("second_player_key")
+            if player_key not in (p1_key, p2_key):
+                continue
+
+            try:
+                m_date = datetime.strptime(event["event_date"], "%Y-%m-%d")
+                days_since = (now - m_date).days
+
+                # Surface from tournament name heuristic
+                tour_name = event.get("tournament_name", "").lower()
+                if any(w in tour_name for w in ("clay", "tierra", "roland")):
+                    surf = 2.0
+                elif any(w in tour_name for w in ("grass", "wimbledon", "halle")):
+                    surf = 3.0
+                else:
+                    surf = 1.0  # default hard
+
+                winner = event.get("event_winner", "")
+                if player_key == p1_key:
+                    win_loss = 1.0 if winner == "First Player" else 0.0
+                    opp_key  = p2_key
+                else:
+                    win_loss = 1.0 if winner == "Second Player" else 0.0
+                    opp_key  = p1_key
+
+                # Opponent rank from cache (best effort)
+                opp_profile = self._profile_cache.get(opp_key, {})
+                opp_rank = float(opp_profile.get("ranking", 100))
+
+                sequence.append([opp_rank, surf, win_loss, float(days_since)])
+                if len(sequence) >= n:
+                    break
+
+            except Exception as exc:
+                log.debug("[API-TENNIS] fetch_recent_matches row error: %s", exc)
+
+        # Pad with zeros if fewer than n
+        while len(sequence) < n:
+            sequence.insert(0, [0.0, 0.0, 0.0, 0.0])
+
+        return sequence[-n:]  # chronological (oldest → newest)
 
     async def get_pregame_matchup(self, player_a_name: str, player_b_name: str) -> dict:
         """
-        Main entry-point used by server.py.
-
-        Fetches both players in parallel and returns a matchup dict with
-        a computed base win probability.
+        Compatibility shim used by historical_analyzer.py.
+        Returns a matchup dict with base_prob_a and player metadata.
         """
         pa, pb = await asyncio.gather(
             self.get_player_data(player_a_name),
             self.get_player_data(player_b_name),
         )
 
-        rank_diff = pb.get("ranking", 50) - pa.get("ranking", 50)
-        elo_diff  = pa.get("elo", 0) - pb.get("elo", 0)
+        elo_a = pa.get("ranking", 100)
+        elo_b = pb.get("ranking", 100)
 
-        # Blended probability:
-        #   40 % from ranking gap  (each rank worth ~1 %)
-        #   40 % from ELO gap      (each 100 ELO points ≈ 4 %)
-        #   20 % from win-rate gap
-        base_prob_a = 0.5
-        base_prob_a += (rank_diff * 0.01)
-        base_prob_a += (elo_diff / 100) * 0.04
-        base_prob_a += (pa.get("win_rate", 0.5) - pb.get("win_rate", 0.5)) * 0.20
-
-        base_prob_a = max(0.05, min(0.95, base_prob_a))
+        # Simple Elo-style win probability from ranking (lower rank = stronger)
+        # Using rank inverse as a proxy since we don't have true Elo
+        pts_a = 1.0 / max(elo_a, 1)
+        pts_b = 1.0 / max(elo_b, 1)
+        base_prob_a = pts_a / (pts_a + pts_b)
 
         return {
             "player_a":    pa,
             "player_b":    pb,
             "base_prob_a": round(base_prob_a, 4),
-            "base_prob_b": round(1.0 - base_prob_a, 4),
+            "meta": {
+                "player_a": pa,
+                "player_b": pb,
+            },
         }
 
+    def _resolve_slug(self, name: str, rankings: dict = None):  # noqa: ARG002
+        """Compatibility shim used by historical_analyzer.py."""
+        return _name_to_slug(name)
 
-# ---------------------------------------------------------------------------
-# Backwards-compatibility alias
-# ATCScraper is the name imported by server.py and test files.
-# ---------------------------------------------------------------------------
-ATCScraper = TennisStatsScraper
+
+# Module alias so existing imports (from tennis_scraper import TennisStatsScraper) still work
+TennisStatsScraper = ApiTennisScraper

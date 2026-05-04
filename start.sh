@@ -39,45 +39,21 @@ echo "[start.sh] Checking dependencies..."
 "$VENV_PY" -m pip install -q --upgrade pip
 "$VENV_PY" -m pip install -q -r requirements.txt
 
-# ── Playwright: Chromium browser for tennisstats.com fallback scraping ────────
-# Downloads the binary once (~130 MB) into ~/.cache/ms-playwright.
-# On Linux also installs the OS-level shared libraries Chromium needs.
-if "$VENV_PY" -c "import playwright" 2>/dev/null; then
-    PW_CACHE="$HOME/.cache/ms-playwright"
-    if [ ! -d "$PW_CACHE" ] || [ -z "$(ls -A "$PW_CACHE" 2>/dev/null)" ]; then
-        echo "[start.sh] Installing Playwright Chromium browser (~130 MB, one-time)..."
-        "$VENV_PY" -m playwright install chromium
-    fi
-    if [ "$(uname)" = "Linux" ]; then
-        echo "[start.sh] Installing Playwright Linux system dependencies..."
-        "$VENV_PY" -m playwright install-deps chromium 2>/dev/null || \
-            echo "[start.sh] WARNING: playwright install-deps failed — run manually if Chromium crashes."
-    fi
-fi
-
-# ── FlareSolverr: Cloudflare bypass for tennisstats.com ──────────────────────
-# tennisstats.com is protected by Cloudflare Managed Challenge, which blocks all
-# programmatic HTTP clients (aiohttp, curl, headless browsers). FlareSolverr is a
-# self-hosted Docker service that solves CF challenges using a real Chrome browser.
-# Without it the bot falls back to Playwright (usually still blocked) and then skips
-# any match where stats cannot be fetched.
-FS_URL="${FLARESOLVERR_URL:-http://localhost:8191/v1}"
-FS_HOST=$(echo "$FS_URL" | sed 's|/v1||')
-if curl -sf --max-time 2 "$FS_HOST/health" >/dev/null 2>&1; then
-    echo "[start.sh] FlareSolverr detected at $FS_URL ✓"
+# ── api-tennis.com key check ──────────────────────────────────────────────────
+if "$VENV_PY" -c "
+import json, sys
+try:
+    d = json.load(open('kalshi_keys.json'))
+    sys.exit(0 if d.get('api_tennis_key') else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+    echo "[start.sh] api-tennis.com key found ✓"
 else
     echo ""
-    echo "  ┌─────────────────────────────────────────────────────────────────┐"
-    echo "  │  FlareSolverr NOT running — tennisstats.com will be BLOCKED     │"
-    echo "  │                                                                   │"
-    echo "  │  tennisstats.com requires FlareSolverr to bypass Cloudflare.    │"
-    echo "  │  Start it now (requires Docker):                                 │"
-    echo "  │                                                                   │"
-    echo "  │    docker run -d --name flaresolverr -p 8191:8191 \\             │"
-    echo "  │      ghcr.io/flaresolverr/flaresolverr:latest                   │"
-    echo "  │                                                                   │"
-    echo "  │  The bot will still run but skip matches with missing stats.     │"
-    echo "  └─────────────────────────────────────────────────────────────────┘"
+    echo "  WARNING: api-tennis.com key not set in kalshi_keys.json"
+    echo "  Add: \"api_tennis_key\": \"your-key-here\""
+    echo "  Get a key at https://api-tennis.com — bot will use generic fallback stats without it."
     echo ""
 fi
 

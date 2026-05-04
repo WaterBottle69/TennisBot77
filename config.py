@@ -48,6 +48,7 @@ local_max_bet = 250.0  # default allocation
 local_use_prod = os.getenv("KALSHI_USE_PROD", "false").lower() == "true"
 local_sportradar_key = os.getenv("SPORTRADAR_API_KEY", "")
 local_flaresolverr_url = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+local_api_tennis_key = os.getenv("API_TENNIS_KEY", "")
 _kd: dict = {}
 if os.path.exists("kalshi_keys.json"):
     try:
@@ -67,6 +68,8 @@ if os.path.exists("kalshi_keys.json"):
             # e.g. "flaresolverr_url": "http://192.168.1.50:8191/v1"
             if _kd.get("flaresolverr_url"):
                 local_flaresolverr_url = _kd["flaresolverr_url"]
+            if _kd.get("api_tennis_key"):
+                local_api_tennis_key = _kd["api_tennis_key"]
     except Exception:
         pass
 
@@ -293,4 +296,5 @@ class Config:
     #
     # If this URL is unreachable the scraper falls back to Playwright automatically.
     FLARESOLVERR_URL: str       = local_flaresolverr_url
+    API_TENNIS_KEY: str         = local_api_tennis_key
 

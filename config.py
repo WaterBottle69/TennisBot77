@@ -47,6 +47,7 @@ local_pem = os.getenv("KALSHI_PRIVATE_KEY_PEM", "")
 local_max_bet = 250.0  # default allocation
 local_use_prod = os.getenv("KALSHI_USE_PROD", "false").lower() == "true"
 local_sportradar_key = os.getenv("SPORTRADAR_API_KEY", "")
+local_flaresolverr_url = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
 _kd: dict = {}
 if os.path.exists("kalshi_keys.json"):
     try:
@@ -62,6 +63,10 @@ if os.path.exists("kalshi_keys.json"):
                 local_use_prod = bool(_kd["use_prod"])
             if _kd.get("sportradar_api_key"):
                 local_sportradar_key = _kd["sportradar_api_key"]
+            # FlareSolverr URL — set this if running FlareSolverr on a different machine
+            # e.g. "flaresolverr_url": "http://192.168.1.50:8191/v1"
+            if _kd.get("flaresolverr_url"):
+                local_flaresolverr_url = _kd["flaresolverr_url"]
     except Exception:
         pass
 
@@ -287,5 +292,5 @@ class Config:
     #     ghcr.io/flaresolverr/flaresolverr:latest
     #
     # If this URL is unreachable the scraper falls back to Playwright automatically.
-    FLARESOLVERR_URL: str       = os.getenv("FLARESOLVERR_URL", "http://localhost:8191/v1")
+    FLARESOLVERR_URL: str       = local_flaresolverr_url
 

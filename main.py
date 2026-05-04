@@ -213,7 +213,6 @@ async def process_match(
     # probability estimates are unreliable — better to skip than to lose.
     def _stats_ok(stats: dict, label: str) -> bool:
         slug = stats.get("slug", "")
-        elo  = stats.get("elo",  0)
         rank = stats.get("ranking", 0)
 
         if not slug:
@@ -223,28 +222,15 @@ async def process_match(
         if any(tok in slug.split("-") for tok in bad_slug_tokens):
             log.warning("[STATS-GATE] %s: slug '%s' looks like a title fragment — aborting.", label, slug)
             return False
-        if not elo and not rank:
-            log.warning("[STATS-GATE] %s: no ELO and no ranking — aborting match.", label)
+        if not rank:
+            log.warning("[STATS-GATE] %s: no ranking — aborting match.", label)
             return False
-        # Explicit generic-fallback check: tennis_scraper returns elo=500,
-        # ranking=100 when the player is not found on tennisstats.com.
-        # These non-zero values fool the check above, but the data is useless —
-        # the model outputs ~50/50, creating false edge against a priced favourite.
-        # data_quality=="low" is the canonical flag; the numeric sentinel is a
-        # second-layer safety net in case the flag was not set.
+        # data_quality="low" is set by the scraper when a player is not found.
+        # This is the canonical gate — block all trades on unknown players.
         if stats.get("data_quality") == "low":
             log.warning(
-                "[STATS-GATE] %s: data_quality=low (player not found on tennisstats.com) — aborting.",
+                "[STATS-GATE] %s: data_quality=low (player not found) — aborting.",
                 label,
-            )
-            return False
-        _FALLBACK_ELO  = 500
-        _FALLBACK_RANK = 100
-        if int(elo) == _FALLBACK_ELO and int(rank) == _FALLBACK_RANK:
-            log.warning(
-                "[STATS-GATE] %s: stats match generic fallback sentinel (elo=%s rank=%s) — "
-                "player likely not found. Aborting to prevent false-edge bets.",
-                label, elo, rank,
             )
             return False
         return True

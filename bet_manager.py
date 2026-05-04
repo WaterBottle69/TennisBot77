@@ -775,6 +775,7 @@ class BetManager:
         size_usdc = self._kelly_size(
             model_prob, market_price,
             available_balance=available_balance,
+            total_balance=total_balance,
             kelly_mult=kelly_mult,
         )
         if size_usdc < self.cfg.MIN_BET_USDC:
@@ -1235,6 +1236,7 @@ class BetManager:
         p: float,
         market_price: float,
         available_balance: float = 0.0,
+        total_balance: float = 0.0,
         kelly_mult: float = 1.0,
     ) -> float:
         """
@@ -1243,6 +1245,11 @@ class BetManager:
         kelly_mult: applied on top of tier fraction.
           - From AdaptiveController: 1.10 (hot), 1.0 (normal), 0.80 (cold), 0.0 (protection)
           - From MarketMonitor:      1.25 (CONFIRM), 1.0 (NEUTRAL) — FADE is blocked upstream
+
+        total_balance: used as the Kelly bankroll (full account value).
+        available_balance: used only as the hard safety cap (can't bet locked funds).
+        Keeping these separate prevents multiple open positions from compounding
+        the bankroll shrinkage and producing near-zero bet sizes.
         """
         if market_price <= 0 or market_price >= 1:
             return 0.0
@@ -1267,18 +1274,26 @@ class BetManager:
 
         effective_fraction = tier_fraction * self.cfg.KELLY_FRACTION * kelly_mult
 
-        bankroll  = available_balance if available_balance > 0 else (self.cfg.MAX_BET_USDC * 4)
+        # Kelly bankroll = full account value (not depleted by open positions).
+        # Fall back to MAX_BET_USDC * 4 if no balance info is available.
+        bankroll = (
+            total_balance if total_balance > 0
+            else available_balance if available_balance > 0
+            else self.cfg.MAX_BET_USDC * 4
+        )
         full_size = f * bankroll
         sized     = full_size * effective_fraction
 
         capped = min(sized, self.cfg.MAX_BET_USDC)
+        # Hard safety cap: never commit more than 90% of free (unlocked) balance.
         if available_balance > 0:
-            capped = min(capped, available_balance * 0.95)
+            capped = min(capped, available_balance * 0.90)
 
         result = max(round(capped, 2), 0.0)
         log.info(
             f"  Kelly sizing: p={p:.3f} tier={tier_fraction:.2f} "
-            f"f*={f:.4f} mult={kelly_mult:.2f} bankroll=${bankroll:.2f} → ${result:.2f}"
+            f"f*={f:.4f} mult={kelly_mult:.2f} "
+            f"bankroll=${bankroll:.2f} (avail=${available_balance:.2f}) → ${result:.2f}"
         )
         return result
 
